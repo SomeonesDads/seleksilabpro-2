@@ -92,6 +92,28 @@ func (s SSOSession) IsValid(now time.Time) bool {
 	return s.Status == "active" && now.Before(s.ExpiresAt) && s.RevokedAt == nil
 }
 
+type MFALoginChallenge struct {
+	ID        uuid.UUID  `gorm:"column:id;type:uuid;default:gen_random_uuid();primaryKey"`
+	UserID    uuid.UUID  `gorm:"column:user_id;type:uuid;not null"`
+	TokenHash string     `gorm:"column:token_hash;type:varchar(255);not null;uniqueIndex"`
+	ExpiresAt time.Time  `gorm:"column:expires_at;not null"`
+	Attempts  int        `gorm:"column:attempts;not null;default:0"`
+	UsedAt    *time.Time `gorm:"column:used_at"`
+	CreatedAt time.Time  `gorm:"column:created_at;not null"`
+}
+
+func (MFALoginChallenge) TableName() string { return "mfa_login_challenges" }
+
+type UserTOTP struct {
+	ID              uuid.UUID `gorm:"column:id;type:uuid;default:gen_random_uuid();primaryKey"`
+	UserID          uuid.UUID `gorm:"column:user_id;type:uuid;not null;uniqueIndex"`
+	EncryptedSecret []byte    `gorm:"column:encrypted_secret;type:bytea;not null"`
+	CreatedAt       time.Time `gorm:"column:created_at;not null"`
+	UpdatedAt       time.Time `gorm:"column:updated_at;not null"`
+}
+
+func (UserTOTP) TableName() string { return "user_totp_credentials" }
+
 type AuthorizationCode struct {
 	ID                  uuid.UUID  `gorm:"column:id;type:uuid;default:gen_random_uuid();primaryKey"`
 	CodeHash            string     `gorm:"column:code_hash;type:varchar(255);not null;uniqueIndex"`
@@ -107,6 +129,22 @@ type AuthorizationCode struct {
 }
 
 func (AuthorizationCode) TableName() string { return "authorization_codes" }
+
+// AccessToken stores revocation metadata for a JWT without storing the signed
+// token itself. The jti is the token's stable denylist key.
+type AccessToken struct {
+	ID            uuid.UUID  `gorm:"column:id;type:uuid;default:gen_random_uuid();primaryKey"`
+	JTI           uuid.UUID  `gorm:"column:jti;type:uuid;not null;uniqueIndex"`
+	UserID        uuid.UUID  `gorm:"column:user_id;type:uuid;not null"`
+	ApplicationID uuid.UUID  `gorm:"column:application_id;type:uuid;not null"`
+	SessionID     uuid.UUID  `gorm:"column:session_id;type:uuid;not null"`
+	ExpiresAt     time.Time  `gorm:"column:expires_at;not null"`
+	RevokedAt     *time.Time `gorm:"column:revoked_at"`
+	RevokeReason  *string    `gorm:"column:revoke_reason;type:varchar(100)"`
+	CreatedAt     time.Time  `gorm:"column:created_at;not null"`
+}
+
+func (AccessToken) TableName() string { return "access_tokens" }
 
 type AuditLog struct {
 	ID            uuid.UUID      `gorm:"column:id;type:uuid;default:gen_random_uuid();primaryKey"`
