@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -69,14 +71,23 @@ func decodeMFAInput(r *http.Request) (mfaInput, error) {
 
 func (h *AuthHandler) validateAuthorizeRequest(r *http.Request) (authorizeRequest, *models.Application, error) {
 	query := r.URL.Query()
-	req := authorizeRequest{
-		ClientID:            query.Get("client_id"),
-		RedirectURI:         query.Get("redirect_uri"),
-		State:               query.Get("state"),
-		CodeChallenge:       query.Get("code_challenge"),
-		CodeChallengeMethod: query.Get("code_challenge_method"),
+	responseType, responseTypeOK := singleQueryValue(query, "response_type")
+	clientID, clientIDOK := singleQueryValue(query, "client_id")
+	redirectURI, redirectURIOK := singleQueryValue(query, "redirect_uri")
+	state, stateOK := singleQueryValue(query, "state")
+	codeChallenge, codeChallengeOK := singleQueryValue(query, "code_challenge")
+	codeChallengeMethod, codeChallengeMethodOK := singleQueryValue(query, "code_challenge_method")
+	if !responseTypeOK || responseType != "code" || !clientIDOK || !redirectURIOK || !stateOK || !codeChallengeOK || !codeChallengeMethodOK || codeChallengeMethod != "S256" || !validS256Challenge(codeChallenge) {
+		return authorizeRequest{}, nil, errInvalidAuthorization
 	}
-	if query.Get("response_type") != "code" || req.ClientID == "" || req.RedirectURI == "" || req.State == "" || req.CodeChallenge == "" || req.CodeChallengeMethod != "S256" {
+	req := authorizeRequest{
+		ClientID:            clientID,
+		RedirectURI:         redirectURI,
+		State:               state,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: codeChallengeMethod,
+	}
+	if _, err := url.Parse(req.RedirectURI); err != nil {
 		return authorizeRequest{}, nil, errInvalidAuthorization
 	}
 	if h.Applications == nil {
@@ -111,10 +122,32 @@ func safeLoginIntent(raw string) (string, bool) {
 		return "", false
 	}
 	query := u.Query()
-	if query.Get("response_type") != "code" || query.Get("client_id") == "" || query.Get("redirect_uri") == "" || query.Get("state") == "" || query.Get("code_challenge") == "" || query.Get("code_challenge_method") != "S256" {
+	responseType, responseTypeOK := singleQueryValue(query, "response_type")
+	clientID, clientIDOK := singleQueryValue(query, "client_id")
+	redirectURI, redirectURIOK := singleQueryValue(query, "redirect_uri")
+	state, stateOK := singleQueryValue(query, "state")
+	codeChallenge, codeChallengeOK := singleQueryValue(query, "code_challenge")
+	codeChallengeMethod, codeChallengeMethodOK := singleQueryValue(query, "code_challenge_method")
+	if !responseTypeOK || responseType != "code" || !clientIDOK || !redirectURIOK || !stateOK || !codeChallengeOK || !codeChallengeMethodOK || codeChallengeMethod != "S256" || !validS256Challenge(codeChallenge) || redirectURI == "" || clientID == "" || state == "" {
 		return "", false
 	}
 	return u.RequestURI(), true
+}
+
+func singleQueryValue(query url.Values, key string) (string, bool) {
+	values, ok := query[key]
+	if !ok || len(values) != 1 || values[0] == "" {
+		return "", false
+	}
+	return values[0], true
+}
+
+func validS256Challenge(challenge string) bool {
+	if len(challenge) != base64.RawURLEncoding.EncodedLen(sha256.Size) {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(challenge)
+	return err == nil && len(decoded) == sha256.Size
 }
 
 func (h *AuthHandler) validateLoginIntent(r *http.Request, raw string) (string, error) {
