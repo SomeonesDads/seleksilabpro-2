@@ -36,6 +36,7 @@ type AuthHandler struct {
 	SessionLookup      SessionLookupStore
 	SessionRevocation  SessionRevocationStore
 	AuthorizationCodes AuthorizationCodeStore
+	TokenRedemption    AuthorizationCodeRedemptionStore
 	Audit              AuditStore
 	AccessTokens       AccessTokenStore
 	Groups             GroupStore
@@ -510,10 +511,13 @@ func (h *AuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /token   (back-channel, server-to-server — App A/B backend calls this)
-// Body: { "grant_type": "authorization_code", "code": "...",
+// Body (JSON or application/x-www-form-urlencoded):
+// { "grant_type": "authorization_code", "code": "...",
 //
 //	"redirect_uri": "...", "client_id": "...", "client_secret": "...",
 //	"code_verifier": "..." }
+//
+// Confidential clients may send credentials with HTTP Basic authentication.
 //
 // Steps:
 //  1. Authenticate the client (client_id + client_secret, if confidential).
@@ -523,32 +527,21 @@ func (h *AuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 //     sso_session is no longer valid.
 //  4. Verify PKCE: idgen.PKCEChallengeS256(code_verifier) ==
 //     stored code_challenge.
-//  5. CRITICAL: mark the code used atomically so it can't be replayed —
-//     do the "still unused?" check and the UPDATE ... SET used_at = now()
-//     in a single statement, e.g.:
-//     UPDATE authorization_codes
-//     SET used_at = now()
-//     WHERE id = $1 AND used_at IS NULL
-//     and check RowsAffected == 1. Two separate SELECT-then-UPDATE calls
-//     have a race window; don't do that.
-//  6. Issue an access token (opaque or JWT per config.TokenStrategy),
-//     INSERT into access_tokens (or just sign a JWT — your call, but
-//     document the tradeoff in the README).
-//  7. Return { "access_token": "...", "token_type": "Bearer", "expires_in": ... }.
+//  5. Issue the JWT and atomically consume the code while inserting token
+//     metadata. The repository must roll back both writes on failure.
+//  6. Return { "access_token": "...", "token_type": "Bearer", "expires_in": ... }.
 func (h *AuthHandler) Token(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		GrantType    string `json:"grant_type"`
-		Code         string `json:"code"`
-		RedirectURI  string `json:"redirect_uri"`
-		ClientID     string `json:"client_id"`
-		ClientSecret string `json:"client_secret"`
-		CodeVerifier string `json:"code_verifier"`
-	}
-	if err := decodeJSONBody(r, &input); err != nil || input.GrantType != "authorization_code" || input.Code == "" || input.RedirectURI == "" || input.ClientID == "" || input.CodeVerifier == "" {
+	input, err := decodeTokenInput(r)
+	if err != nil || input.GrantType != "authorization_code" || input.Code == "" || input.RedirectURI == "" || input.CodeVerifier == "" {
 		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidGrant, "authorization grant invalid")
 		return
 	}
-	app, err := h.findClient(r, input.ClientID, input.ClientSecret)
+	clientID, clientSecret, credentialsOK := tokenClientCredentials(r, input)
+	if !credentialsOK {
+		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeInvalidClient, "client authentication failed")
+		return
+	}
+	app, err := h.findClient(r, clientID, clientSecret)
 	if err != nil {
 		if errors.Is(err, errInvalidClient) {
 			writeError(w, r, http.StatusUnauthorized, sharederrors.CodeInvalidClient, "client authentication failed")
@@ -558,33 +551,52 @@ func (h *AuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "token service unavailable")
 		return
 	}
-	if h.AuthorizationCodes == nil || h.sessionLookup() == nil || h.userProfiles() == nil || h.AccessTokens == nil {
+	if h.AuthorizationCodes == nil || h.TokenRedemption == nil || h.sessionLookup() == nil || h.userProfiles() == nil {
 		h.log().Error("token repositories are not configured")
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "token service unavailable")
 		return
 	}
 	code, err := h.AuthorizationCodes.FindByHash(r.Context(), idgen.HashToken(input.Code))
-	if err != nil || code == nil || code.UsedAt != nil || !time.Now().Before(code.ExpiresAt) || code.ApplicationID != app.ID || code.RedirectURI != input.RedirectURI || code.CodeChallengeMethod != "S256" || !equalPKCE(code.CodeChallenge, input.CodeVerifier) {
+	if err != nil {
+		if !errors.Is(err, repository.ErrAuthorizationCodeNotFound) {
+			h.log().Error("authorization code lookup failed", slog.Any("err", err))
+			writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "token service unavailable")
+			return
+		}
+		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidGrant, "authorization grant invalid")
+		return
+	}
+	if code == nil || code.UsedAt != nil || !time.Now().Before(code.ExpiresAt) || code.ApplicationID != app.ID || code.RedirectURI != input.RedirectURI || code.CodeChallengeMethod != "S256" || !validS256Challenge(code.CodeChallenge) || !equalPKCE(code.CodeChallenge, input.CodeVerifier) {
 		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidGrant, "authorization grant invalid")
 		return
 	}
 	session, err := h.sessionLookup().FindActiveByID(r.Context(), code.SSOSessionID)
 	if err != nil {
+		if !errors.Is(err, repository.ErrSessionNotFound) {
+			h.log().Error("authorization session lookup failed", slog.Any("err", err))
+			writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "token service unavailable")
+			return
+		}
 		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidGrant, "authorization grant invalid")
 		return
 	}
 	user, err := h.userProfiles().FindByID(r.Context(), code.UserID)
-	if err != nil || session == nil || user == nil || !user.IsActive() || session.UserID != user.ID {
+	if err != nil {
+		if !errors.Is(err, repository.ErrUserNotFound) {
+			h.log().Error("authorization user lookup failed", slog.Any("err", err))
+			writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "token service unavailable")
+			return
+		}
+		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidGrant, "authorization grant invalid")
+		return
+	}
+	if session == nil || user == nil || !user.IsActive() || session.UserID != user.ID {
 		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidGrant, "authorization grant invalid")
 		return
 	}
 	if h.tokenStrategy() != "jwt" || len(h.JWTSigningKey) == 0 {
 		h.log().Error("unsupported token configuration")
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "token service unavailable")
-		return
-	}
-	if err := h.AuthorizationCodes.ConsumeAtomically(r.Context(), code.ID); err != nil {
-		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidGrant, "authorization grant invalid")
 		return
 	}
 	accessToken, err := tokens.IssueAccessToken(h.JWTSigningKey, h.jwtIssuer(), user.ID.String(), app.ID.String(), session.ID.String(), h.accessTokenTTL())
@@ -605,8 +617,18 @@ func (h *AuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "token service unavailable")
 		return
 	}
-	if err := h.AccessTokens.Create(r.Context(), &models.AccessToken{JTI: jti, UserID: user.ID, ApplicationID: app.ID, SessionID: session.ID, ExpiresAt: claims.ExpiresAt.Time}); err != nil {
-		h.log().Error("access token metadata creation failed", slog.Any("err", err))
+	if claims.ExpiresAt == nil {
+		h.log().Error("access token expiry claim missing")
+		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "token service unavailable")
+		return
+	}
+	metadata := &models.AccessToken{JTI: jti, UserID: user.ID, ApplicationID: app.ID, SessionID: session.ID, ExpiresAt: claims.ExpiresAt.Time}
+	if err := h.TokenRedemption.Redeem(r.Context(), code.ID, metadata); err != nil {
+		if errors.Is(err, repository.ErrAuthorizationCodeNotFound) {
+			writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidGrant, "authorization grant invalid")
+			return
+		}
+		h.log().Error("authorization code redemption failed", slog.Any("err", err))
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "token service unavailable")
 		return
 	}

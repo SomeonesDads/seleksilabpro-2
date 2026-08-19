@@ -78,6 +78,7 @@ func main() {
 		SessionLookup:     sessionRepo,
 		SessionRevocation: sessionRepo,
 		AuthorizationCode: authorizationCodeRepo,
+		TokenRedemption:   authorizationCodeRepo,
 		Audit:             auditRepo,
 		AccessTokens:      accessTokenRepo,
 		Groups:            groupRepo,

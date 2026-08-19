@@ -42,6 +42,15 @@ type mfaInput struct {
 	ReturnTo string `json:"return_to"`
 }
 
+type tokenInput struct {
+	GrantType    string `json:"grant_type"`
+	Code         string `json:"code"`
+	RedirectURI  string `json:"redirect_uri"`
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	CodeVerifier string `json:"code_verifier"`
+}
+
 func decodeLoginInput(r *http.Request) (loginInput, error) {
 	var input loginInput
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
@@ -66,6 +75,23 @@ func decodeMFAInput(r *http.Request) (mfaInput, error) {
 	}
 	input.Code = r.FormValue("code")
 	input.ReturnTo = r.FormValue("return_to")
+	return input, nil
+}
+
+func decodeTokenInput(r *http.Request) (tokenInput, error) {
+	var input tokenInput
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		return input, decodeJSONBody(r, &input)
+	}
+	if err := r.ParseForm(); err != nil {
+		return input, err
+	}
+	input.GrantType = r.PostFormValue("grant_type")
+	input.Code = r.PostFormValue("code")
+	input.RedirectURI = r.PostFormValue("redirect_uri")
+	input.ClientID = r.PostFormValue("client_id")
+	input.ClientSecret = r.PostFormValue("client_secret")
+	input.CodeVerifier = r.PostFormValue("code_verifier")
 	return input, nil
 }
 
@@ -249,6 +275,27 @@ func (h *AuthHandler) findClient(r *http.Request, clientID, clientSecret string)
 		}
 	}
 	return app, nil
+}
+
+func tokenClientCredentials(r *http.Request, input tokenInput) (string, string, bool) {
+	bodyClientID := strings.TrimSpace(input.ClientID)
+	basicClientID, basicClientSecret, basicOK := r.BasicAuth()
+	if basicOK {
+		if bodyClientID != "" && bodyClientID != basicClientID {
+			return "", "", false
+		}
+		if input.ClientSecret != "" && input.ClientSecret != basicClientSecret {
+			return "", "", false
+		}
+		if basicClientID == "" {
+			return "", "", false
+		}
+		return basicClientID, basicClientSecret, true
+	}
+	if bodyClientID == "" {
+		return "", "", false
+	}
+	return bodyClientID, input.ClientSecret, true
 }
 
 func clientCredentials(r *http.Request) (string, string) {

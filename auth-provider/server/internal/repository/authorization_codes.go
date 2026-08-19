@@ -45,3 +45,23 @@ func (r *AuthorizationCodeRepository) ConsumeAtomically(ctx context.Context, id 
 	}
 	return nil
 }
+
+// Redeem consumes an authorization code and persists its token metadata in one
+// transaction. A failed metadata insert rolls back the code consumption.
+func (r *AuthorizationCodeRepository) Redeem(ctx context.Context, id uuid.UUID, token *models.AccessToken) error {
+	if token == nil {
+		return errors.New("access token metadata is required")
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&models.AuthorizationCode{}).
+			Where("id = ? AND used_at IS NULL AND expires_at > now()", id).
+			UpdateColumn("used_at", gorm.Expr("now()"))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrAuthorizationCodeNotFound
+		}
+		return tx.Create(token).Error
+	})
+}

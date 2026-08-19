@@ -57,6 +57,10 @@ type AuthorizationCodeStore interface {
 	ConsumeAtomically(context.Context, uuid.UUID) error
 }
 
+type AuthorizationCodeRedemptionStore interface {
+	Redeem(context.Context, uuid.UUID, *models.AccessToken) error
+}
+
 type AuditStore interface {
 	WriteAuditLog(context.Context, *models.AuditLog) error
 }
@@ -118,6 +122,7 @@ type AuthRepositories struct {
 	SessionLookup     SessionLookupStore
 	SessionRevocation SessionRevocationStore
 	AuthorizationCode AuthorizationCodeStore
+	TokenRedemption   AuthorizationCodeRedemptionStore
 	Audit             AuditStore
 	AccessTokens      AccessTokenStore
 	Groups            GroupStore
@@ -174,6 +179,10 @@ func NewAuthHandlerWithDependencies(repos AuthRepositories, cfg AuthHandlerConfi
 	if logger == nil {
 		logger = slog.Default()
 	}
+	tokenRedemption := repos.TokenRedemption
+	if tokenRedemption == nil {
+		tokenRedemption = authorizationCodeRedemption(repos.AuthorizationCode)
+	}
 	return &AuthHandler{
 		Users:              repos.Users,
 		UserProfiles:       repos.UserProfiles,
@@ -185,6 +194,7 @@ func NewAuthHandlerWithDependencies(repos AuthRepositories, cfg AuthHandlerConfi
 		SessionLookup:      repos.SessionLookup,
 		SessionRevocation:  repos.SessionRevocation,
 		AuthorizationCodes: repos.AuthorizationCode,
+		TokenRedemption:    tokenRedemption,
 		Audit:              repos.Audit,
 		AccessTokens:       repos.AccessTokens,
 		Groups:             repos.Groups,
@@ -196,4 +206,9 @@ func NewAuthHandlerWithDependencies(repos AuthRepositories, cfg AuthHandlerConfi
 		JWTSigningKey:      cfg.JWTSigningKey,
 		TokenStrategy:      cfg.TokenStrategy,
 	}
+}
+
+func authorizationCodeRedemption(store AuthorizationCodeStore) AuthorizationCodeRedemptionStore {
+	redeemer, _ := store.(AuthorizationCodeRedemptionStore)
+	return redeemer
 }
