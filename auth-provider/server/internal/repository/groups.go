@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/models"
 	"github.com/google/uuid"
@@ -53,6 +54,44 @@ func (r *GroupRepository) AddUser(ctx context.Context, groupID, userID uuid.UUID
 }
 
 func (r *GroupRepository) RemoveUser(ctx context.Context, groupID, userID uuid.UUID) error {
-	result := r.db.WithContext(ctx).Where("group_id = ? AND user_id = ?", groupID, userID).Delete(&models.UserGroup{})
-	return result.Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var applicationIDs []uuid.UUID
+		if err := tx.Raw(`
+			SELECT DISTINCT p.application_id
+			FROM application_group_policies p
+			JOIN user_groups removed_membership
+			  ON removed_membership.group_id = p.group_id
+			 AND removed_membership.user_id = ?
+			WHERE p.group_id = ?
+			  AND p.effect = 'allow'
+			  AND NOT EXISTS (
+				  SELECT 1
+				  FROM user_groups other_membership
+				  JOIN application_group_policies other_policy
+				    ON other_policy.group_id = other_membership.group_id
+				   AND other_policy.application_id = p.application_id
+				   AND other_policy.effect = 'allow'
+				  WHERE other_membership.user_id = ?
+				    AND other_membership.group_id <> ?
+			  )`, userID, groupID, userID, groupID).Scan(&applicationIDs).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Where("group_id = ? AND user_id = ?", groupID, userID).Delete(&models.UserGroup{}).Error; err != nil {
+			return err
+		}
+
+		now := time.Now()
+		for _, applicationID := range applicationIDs {
+			if err := tx.Model(&models.AccessToken{}).
+				Where("user_id = ? AND application_id = ? AND revoked_at IS NULL", userID, applicationID).
+				Updates(map[string]any{"revoked_at": now, "revoke_reason": "access_policy_changed"}).Error; err != nil {
+				return err
+			}
+			if err := createAccessPolicyChangedEvent(tx, userID, applicationID, "access_policy_changed"); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

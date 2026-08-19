@@ -33,19 +33,40 @@ func createSessionRevokedEvent(db *gorm.DB, session *models.SSOSession, reason s
 }
 
 func buildSessionRevokedEvent(session *models.SSOSession, reason string) *models.Event {
+	return buildRevocationEvent(models.EventSessionRevoked, session.UserID, &session.ID, nil, reason)
+}
+
+func createPasswordChangedEvent(db *gorm.DB, session *models.SSOSession, reason string) error {
+	return db.Create(buildPasswordChangedEvent(session, reason)).Error
+}
+
+func buildPasswordChangedEvent(session *models.SSOSession, reason string) *models.Event {
+	return buildRevocationEvent(models.EventPasswordChanged, session.UserID, &session.ID, nil, reason)
+}
+
+func createAccessPolicyChangedEvent(db *gorm.DB, userID, applicationID uuid.UUID, reason string) error {
+	return db.Create(buildAccessPolicyChangedEvent(userID, applicationID, reason)).Error
+}
+
+func buildAccessPolicyChangedEvent(userID, applicationID uuid.UUID, reason string) *models.Event {
+	return buildRevocationEvent(models.EventAccessPolicyChanged, userID, nil, &applicationID, reason)
+}
+
+func buildRevocationEvent(eventType string, userID uuid.UUID, sessionID, applicationID *uuid.UUID, reason string) *models.Event {
 	eventID := uuid.New()
 	occurredAt := time.Now().UTC()
 	return &models.Event{
 		ID:               eventID,
-		EventType:        models.EventSessionRevoked,
-		UserID:           session.UserID,
-		CentralSessionID: &session.ID,
+		EventType:        eventType,
+		UserID:           userID,
+		CentralSessionID: sessionID,
+		ApplicationID:    applicationID,
 		Payload: map[string]any{
 			"eventId":          eventID.String(),
-			"eventType":        models.EventSessionRevoked,
-			"userId":           session.UserID.String(),
-			"centralSessionId": session.ID.String(),
-			"applicationId":    nil,
+			"eventType":        eventType,
+			"userId":           userID.String(),
+			"centralSessionId": uuidString(sessionID),
+			"applicationId":    uuidString(applicationID),
 			"reason":           reason,
 			"occurredAt":       occurredAt.Format(time.RFC3339Nano),
 			"metadata":         map[string]any{},
@@ -53,4 +74,11 @@ func buildSessionRevokedEvent(session *models.SSOSession, reason string) *models
 		Status:    "pending",
 		CreatedAt: occurredAt,
 	}
+}
+
+func uuidString(id *uuid.UUID) any {
+	if id == nil {
+		return nil
+	}
+	return id.String()
 }

@@ -223,7 +223,7 @@ func (r *UserRepository) updateUser(ctx context.Context, db *gorm.DB, id uuid.UU
 				Updates(map[string]any{"status": "revoked", "revoked_at": time.Now(), "revoke_reason": "password_changed"}).Error; err != nil {
 				return nil, err
 			}
-			if err := createSessionRevokedEvent(db.WithContext(ctx), &sessions[i], "password_changed"); err != nil {
+			if err := createPasswordChangedEvent(db.WithContext(ctx), &sessions[i], "password_changed"); err != nil {
 				return nil, err
 			}
 		}
