@@ -1,0 +1,160 @@
+version: "3.9"
+
+# ---------------------------------------------------------------------------
+# One command should bring up the whole stack:
+#   docker compose up --build
+#
+# Ports (adjust freely, just keep README in sync):
+#   5001  Auth Provider Server   (OAuth2 endpoints + admin API)
+#   5002  Control Panel Admin    (admin web UI)
+#   5010  App A
+#   5020  App B
+#   5672  RabbitMQ (AMQP)
+#   15672 RabbitMQ management UI
+#   5433  Postgres - primary (auth provider)
+#   5434  Postgres - local db (App A)
+#   5435  Postgres - local db (App B)
+# ---------------------------------------------------------------------------
+
+services:
+
+  postgres-primary:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PRIMARY_DB_USER:-authprovider}
+      POSTGRES_PASSWORD: ${PRIMARY_DB_PASSWORD:-authprovider}
+      POSTGRES_DB: ${PRIMARY_DB_NAME:-authprovider}
+    ports:
+      - "5433:5432"
+    volumes:
+      - primary_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PRIMARY_DB_USER:-authprovider}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  postgres-app-a:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${APP_A_DB_USER:-appa}
+      POSTGRES_PASSWORD: ${APP_A_DB_PASSWORD:-appa}
+      POSTGRES_DB: ${APP_A_DB_NAME:-appa}
+    ports:
+      - "5434:5432"
+    volumes:
+      - app_a_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${APP_A_DB_USER:-appa}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  postgres-app-b:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${APP_B_DB_USER:-appb}
+      POSTGRES_PASSWORD: ${APP_B_DB_PASSWORD:-appb}
+      POSTGRES_DB: ${APP_B_DB_NAME:-appb}
+    ports:
+      - "5435:5432"
+    volumes:
+      - app_b_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${APP_B_DB_USER:-appb}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${BROKER_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${BROKER_PASSWORD:-guest}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  auth-server:
+    build:
+      context: .
+      dockerfile: auth-provider/server/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - auth-provider/server/.env
+    ports:
+      - "5001:5001"
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  control-panel:
+    build:
+      context: .
+      dockerfile: auth-provider/control-panel/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - auth-provider/control-panel/.env
+    ports:
+      - "5002:5002"
+    depends_on:
+      - auth-server
+
+  sync-worker:
+    build:
+      context: .
+      dockerfile: auth-provider/sync-worker/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - auth-provider/sync-worker/.env
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  app-a:
+    build:
+      context: .
+      dockerfile: applications/app-a/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - applications/app-a/.env
+    ports:
+      - "5010:5010"
+    depends_on:
+      postgres-app-a:
+        condition: service_healthy
+      auth-server:
+        condition: service_started
+
+  app-b:
+    build:
+      context: .
+      dockerfile: applications/app-b/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - applications/app-b/.env
+    ports:
+      - "5020:5020"
+    depends_on:
+      postgres-app-b:
+        condition: service_healthy
+      auth-server:
+        condition: service_started
+
+volumes:
+  primary_db_data:
+  app_a_db_data:
+  app_b_db_data:
