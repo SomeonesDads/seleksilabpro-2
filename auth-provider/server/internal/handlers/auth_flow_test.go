@@ -80,9 +80,10 @@ func (p flowPolicy) UserHasApplicationAccess(context.Context, uuid.UUID, uuid.UU
 }
 
 type flowSessions struct {
-	byHash  map[string]*models.SSOSession
-	created *models.SSOSession
-	revoked bool
+	byHash           map[string]*models.SSOSession
+	created          *models.SSOSession
+	revoked          bool
+	bypassStateCheck bool
 }
 
 func (s *flowSessions) Create(_ context.Context, session *models.SSOSession) error {
@@ -103,7 +104,7 @@ func (s *flowSessions) FindActiveByTokenHash(_ context.Context, hash string) (*m
 }
 
 func (s *flowSessions) FindActiveByID(_ context.Context, id uuid.UUID) (*models.SSOSession, error) {
-	if s.created == nil || s.created.ID != id || s.revoked || !s.created.IsValid(time.Now()) {
+	if s.created == nil || s.created.ID != id || s.revoked || (!s.bypassStateCheck && !s.created.IsValid(time.Now())) {
 		return nil, repository.ErrSessionNotFound
 	}
 	return s.created, nil
@@ -173,8 +174,9 @@ func (s *flowCodes) Redeem(ctx context.Context, id uuid.UUID, token *models.Acce
 }
 
 type flowTokens struct {
-	token     *models.AccessToken
-	createErr error
+	token            *models.AccessToken
+	createErr        error
+	bypassStateCheck bool
 }
 
 func (s *flowTokens) Create(_ context.Context, token *models.AccessToken) error {
@@ -186,7 +188,7 @@ func (s *flowTokens) Create(_ context.Context, token *models.AccessToken) error 
 }
 
 func (s *flowTokens) FindActiveByJTI(_ context.Context, jti uuid.UUID) (*models.AccessToken, error) {
-	if s.token == nil || s.token.JTI != jti || s.token.RevokedAt != nil || !time.Now().Before(s.token.ExpiresAt) {
+	if s.token == nil || s.token.JTI != jti || (!s.bypassStateCheck && (s.token.RevokedAt != nil || !time.Now().Before(s.token.ExpiresAt))) {
 		return nil, repository.ErrAccessTokenNotFound
 	}
 	return s.token, nil
@@ -741,6 +743,56 @@ func TestUserInfoRejectsMissingOrWrongCaller(t *testing.T) {
 	handler.UserInfo(wrongResponse, wrongCaller)
 	if wrongResponse.Code != http.StatusUnauthorized {
 		t.Fatalf("wrong caller identity status = %d", wrongResponse.Code)
+	}
+}
+
+func TestUserInfoRejectsStaleTokenAndSessionRecords(t *testing.T) {
+	key := []byte("test-signing-key")
+	user := models.User{ID: uuid.New(), Name: "Ada", Email: "ada@example.com", Status: "active"}
+	application := models.Application{ID: uuid.New(), ClientID: "app-client", Status: "active"}
+	for _, test := range []struct {
+		name  string
+		setup func(*models.AccessToken, *models.SSOSession)
+	}{
+		{name: "expired metadata", setup: func(token *models.AccessToken, _ *models.SSOSession) { token.ExpiresAt = time.Now().Add(-time.Minute) }},
+		{name: "revoked metadata", setup: func(token *models.AccessToken, _ *models.SSOSession) { now := time.Now(); token.RevokedAt = &now }},
+		{name: "expired session", setup: func(_ *models.AccessToken, session *models.SSOSession) {
+			session.ExpiresAt = time.Now().Add(-time.Minute)
+		}},
+		{name: "revoked session", setup: func(_ *models.AccessToken, session *models.SSOSession) { session.Status = "revoked" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			session := &models.SSOSession{ID: uuid.New(), UserID: user.ID, Status: "active", ExpiresAt: time.Now().Add(time.Hour)}
+			accessToken, err := tokens.IssueAccessToken(key, "auth-provider", user.ID.String(), application.ID.String(), session.ID.String(), time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claims, err := tokens.ValidateAccessToken(accessToken, key, "auth-provider", application.ID.String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			jti, err := uuid.Parse(claims.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadata := &models.AccessToken{JTI: jti, UserID: user.ID, ApplicationID: application.ID, SessionID: session.ID, ExpiresAt: time.Now().Add(time.Minute)}
+			test.setup(metadata, session)
+			handler := NewAuthHandlerWithDependencies(AuthRepositories{
+				Users:        &flowUsers{user: user},
+				Applications: &flowApplications{application: application},
+				Sessions:     &flowSessions{created: session, bypassStateCheck: true},
+				AccessTokens: &flowTokens{token: metadata, bypassStateCheck: true},
+				Groups:       flowGroups{},
+			}, AuthHandlerConfig{JWTSigningKey: key}, nil)
+			request := httptest.NewRequest(http.MethodGet, "/userinfo", nil)
+			request.Header.Set("Authorization", "Bearer "+accessToken)
+			request.Header.Set("X-Client-ID", application.ClientID)
+			response := httptest.NewRecorder()
+			handler.UserInfo(response, request)
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("stale state was accepted: status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 

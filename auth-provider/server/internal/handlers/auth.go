@@ -663,6 +663,11 @@ func (h *AuthHandler) UserInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "user information unavailable")
 		return
 	}
+	if h.tokenStrategy() != "jwt" || len(h.JWTSigningKey) == 0 {
+		h.log().Error("unsupported token configuration")
+		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "user information unavailable")
+		return
+	}
 	claims, err := tokens.ValidateAccessToken(accessToken, h.JWTSigningKey, h.jwtIssuer(), app.ID.String())
 	if err != nil {
 		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid access token")
@@ -676,17 +681,44 @@ func (h *AuthHandler) UserInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	metadata, err := h.AccessTokens.FindActiveByJTI(r.Context(), jti)
-	if err != nil || metadata == nil || metadata.ApplicationID != app.ID || metadata.SessionID != sessionID || metadata.UserID != userID {
+	if err != nil {
+		if errors.Is(err, repository.ErrAccessTokenNotFound) {
+			writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid access token")
+			return
+		}
+		h.log().Error("userinfo access-token lookup failed", slog.Any("err", err))
+		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "user information unavailable")
+		return
+	}
+	if metadata == nil || metadata.JTI != jti || metadata.ApplicationID != app.ID || metadata.SessionID != sessionID || metadata.UserID != userID || metadata.RevokedAt != nil || metadata.ExpiresAt.IsZero() || !time.Now().Before(metadata.ExpiresAt) {
 		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid access token")
 		return
 	}
 	activeSession, err := h.sessionLookup().FindActiveByID(r.Context(), sessionID)
-	if err != nil || activeSession == nil {
+	if err != nil {
+		if errors.Is(err, repository.ErrSessionNotFound) {
+			writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid access token")
+			return
+		}
+		h.log().Error("userinfo session lookup failed", slog.Any("err", err))
+		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "user information unavailable")
+		return
+	}
+	if activeSession == nil || activeSession.UserID != userID || !activeSession.IsValid(time.Now()) {
 		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid access token")
 		return
 	}
 	user, err := h.userProfiles().FindByID(r.Context(), userID)
-	if err != nil || user == nil || !user.IsActive() {
+	if err != nil {
+		if errors.Is(err, repository.ErrUserNotFound) {
+			writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid access token")
+			return
+		}
+		h.log().Error("userinfo user lookup failed", slog.Any("err", err))
+		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "user information unavailable")
+		return
+	}
+	if user == nil || user.ID != userID || !user.IsActive() {
 		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid access token")
 		return
 	}
