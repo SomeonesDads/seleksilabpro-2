@@ -111,10 +111,31 @@ func safeLoginIntent(raw string) (string, bool) {
 		return "", false
 	}
 	query := u.Query()
-	if query.Get("response_type") == "" || query.Get("client_id") == "" || query.Get("redirect_uri") == "" {
+	if query.Get("response_type") != "code" || query.Get("client_id") == "" || query.Get("redirect_uri") == "" || query.Get("state") == "" || query.Get("code_challenge") == "" || query.Get("code_challenge_method") != "S256" {
 		return "", false
 	}
 	return u.RequestURI(), true
+}
+
+func (h *AuthHandler) validateLoginIntent(r *http.Request, raw string) (string, error) {
+	intent, ok := safeLoginIntent(raw)
+	if !ok {
+		return "", errInvalidAuthorization
+	}
+	if intent == "" {
+		return "", nil
+	}
+
+	target, err := url.Parse(intent)
+	if err != nil {
+		return "", errInvalidAuthorization
+	}
+	validationRequest := r.Clone(r.Context())
+	validationRequest.URL = target
+	if _, _, err := h.validateAuthorizeRequest(validationRequest); err != nil {
+		return "", err
+	}
+	return intent, nil
 }
 
 func loginRedirectTarget(requestURI string) string {

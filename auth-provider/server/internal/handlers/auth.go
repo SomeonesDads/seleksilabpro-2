@@ -53,8 +53,13 @@ type AuthHandler struct {
 // Renders (or redirects to) the login page. If a valid central session
 // cookie is already present, this may be skipped entirely by /authorize.
 func (h *AuthHandler) LoginPage(w http.ResponseWriter, r *http.Request) {
-	intent, ok := safeLoginIntent(r.URL.Query().Get("return_to"))
-	if !ok {
+	intent, err := h.validateLoginIntent(r, r.URL.Query().Get("return_to"))
+	if err != nil {
+		if !errors.Is(err, errInvalidAuthorization) {
+			h.log().Error("login intent validation failed", slog.Any("err", err))
+			writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "authentication unavailable")
+			return
+		}
 		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidRequest, "invalid login request")
 		return
 	}
@@ -80,8 +85,13 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid credentials")
 		return
 	}
-	intent, ok := safeLoginIntent(input.ReturnTo)
-	if !ok {
+	intent, err := h.validateLoginIntent(r, input.ReturnTo)
+	if err != nil {
+		if !errors.Is(err, errInvalidAuthorization) {
+			h.log().Error("login intent validation failed", slog.Any("err", err))
+			writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "authentication unavailable")
+			return
+		}
 		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidRequest, "invalid login request")
 		return
 	}
@@ -93,11 +103,14 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	user, err := h.Users.FindByEmail(r.Context(), input.Email)
 	if err != nil {
-		if !errors.Is(err, repository.ErrUserNotFound) {
-			h.log().Error("user lookup failed", slog.Any("err", err))
+		if errors.Is(err, repository.ErrUserNotFound) {
+			h.audit(r, "LoginFailed", "failed", nil, nil, nil, nil)
+			writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid credentials")
+			return
 		}
+		h.log().Error("user lookup failed", slog.Any("err", err))
 		h.audit(r, "LoginFailed", "failed", nil, nil, nil, nil)
-		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid credentials")
+		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "authentication unavailable")
 		return
 	}
 	// 2. Compare password + cek aktif/ga
@@ -113,10 +126,10 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.TOTP != nil {
-		_, totpErr := h.TOTP.FindByUserID(r.Context(), user.ID)
-		if totpErr == nil {
+		credential, totpErr := h.TOTP.FindByUserID(r.Context(), user.ID)
+		if totpErr == nil && credential != nil {
 			// Continue below with a short-lived MFA challenge.
-		} else if errors.Is(totpErr, repository.ErrTOTPNotFound) {
+		} else if totpErr == nil || errors.Is(totpErr, repository.ErrTOTPNotFound) {
 			if err := h.completePasswordLogin(w, r, user.ID, intent); err != nil {
 				h.log().Error("session creation failed", slog.Any("err", err))
 				userID := user.ID
@@ -182,8 +195,13 @@ func (h *AuthHandler) LoginMFA(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid MFA code")
 		return
 	}
-	intent, ok := safeLoginIntent(input.ReturnTo)
-	if !ok {
+	intent, err := h.validateLoginIntent(r, input.ReturnTo)
+	if err != nil {
+		if !errors.Is(err, errInvalidAuthorization) {
+			h.log().Error("MFA login intent validation failed", slog.Any("err", err))
+			writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "authentication unavailable")
+			return
+		}
 		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidRequest, "invalid login request")
 		return
 	}

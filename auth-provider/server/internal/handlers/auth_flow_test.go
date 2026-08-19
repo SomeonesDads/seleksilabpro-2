@@ -208,6 +208,66 @@ func (s *flowMFA) ConsumeAndCreateSession(_ context.Context, _ uuid.UUID, sessio
 	return nil
 }
 
+type emptyFlowTOTP struct{}
+
+func (emptyFlowTOTP) FindByUserID(context.Context, uuid.UUID) (*models.UserTOTP, error) {
+	return nil, nil
+}
+
+func TestLoginIntentIsRevalidatedAgainstAuthorizationRequest(t *testing.T) {
+	application := models.Application{ID: uuid.New(), ClientID: "app-client", Status: "active"}
+	handler := NewAuthHandlerWithDependencies(AuthRepositories{
+		Applications: &flowApplications{application: application},
+	}, AuthHandlerConfig{}, nil)
+
+	invalidIntent := "/authorize?response_type=code&client_id=app-client&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback.evil&state=state&code_challenge=challenge&code_challenge_method=S256"
+	pageRequest := httptest.NewRequest(http.MethodGet, "/login?return_to="+url.QueryEscape(invalidIntent), nil)
+	pageResponse := httptest.NewRecorder()
+	handler.LoginPage(pageResponse, pageRequest)
+	if pageResponse.Code != http.StatusBadRequest || strings.Contains(pageResponse.Body.String(), "<form") {
+		t.Fatalf("invalid login intent was accepted by login page: status=%d body=%s", pageResponse.Code, pageResponse.Body.String())
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte("password"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := &flowSessions{byHash: make(map[string]*models.SSOSession)}
+	handler = NewAuthHandlerWithDependencies(AuthRepositories{
+		Users:        &flowUsers{user: models.User{ID: uuid.New(), Email: "ada@example.com", PasswordHash: string(passwordHash), Status: "active"}},
+		Applications: &flowApplications{application: application},
+		Sessions:     sessions,
+	}, AuthHandlerConfig{}, nil)
+	loginRequest := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"email":"ada@example.com","password":"password","return_to":"`+invalidIntent+`"}`))
+	loginRequest.Header.Set("Content-Type", "application/json")
+	loginResponse := httptest.NewRecorder()
+	handler.Login(loginResponse, loginRequest)
+	if loginResponse.Code != http.StatusBadRequest || sessions.created != nil {
+		t.Fatalf("invalid login intent was accepted by login handler: status=%d body=%s", loginResponse.Code, loginResponse.Body.String())
+	}
+}
+
+func TestLoginTreatsNilTOTPRecordAsNoMFA(t *testing.T) {
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte("password"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := &flowSessions{byHash: make(map[string]*models.SSOSession)}
+	handler := NewAuthHandlerWithDependencies(AuthRepositories{
+		Users:    &flowUsers{user: models.User{ID: uuid.New(), Email: "ada@example.com", PasswordHash: string(passwordHash), Status: "active"}},
+		TOTP:     emptyFlowTOTP{},
+		Sessions: sessions,
+	}, AuthHandlerConfig{}, nil)
+
+	request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"email":"ada@example.com","password":"password"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.Login(response, request)
+	if response.Code != http.StatusOK || sessions.created == nil || strings.Contains(response.Body.String(), "mfa_required\":true") {
+		t.Fatalf("nil TOTP record incorrectly required MFA: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestAuthFlowLoginAuthorizeTokenUserInfoLogout(t *testing.T) {
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte("password"), bcrypt.MinCost)
 	if err != nil {
