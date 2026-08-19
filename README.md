@@ -31,6 +31,10 @@ JWT bukan pilihan yang unggul untuk semua kebutuhan. Token yang sudah diterbitka
 
 Logout dan perubahan policy tetap dicatat sebagai event transactional outbox dan dikirim ke relying applications melalui Sync Worker. Dengan TTL access token yang pendek, propagasi logout membatasi sesi aplikasi yang tersisa tanpa memerlukan query database pada setiap request.
 
+Sync Worker membaca event outbox yang belum dipublikasikan dari database, menerbitkannya ke RabbitMQ dengan routing key `SessionRevoked`, `PasswordChanged`, atau `AccessPolicyChanged`, lalu mengirim payload ke endpoint `logout_notification_url` aplikasi. Pengiriman internal memakai header `X-Internal-Auth`; token per aplikasi hanya dikonfigurasi melalui `APP_TARGETS_JSON` pada Sync Worker dan tidak disimpan di database. `APP_TARGETS_JSON` wajib memuat setiap aplikasi aktif sebelum worker mulai mengonsumsi pesan.
+
+Integration test persistence: set `TEST_DATABASE_URL` to disposable PostgreSQL, then run `go test ./internal/store -run TestStorePostgresIntegration` from `auth-provider/sync-worker`.
+
 ### Perbandingan dengan opaque token
 
 Opaque token lebih mudah dicabut secara real-time karena setiap validasi dapat melakukan lookup ke database. Namun, pendekatan tersebut menambah latency dan beban database pada setiap request ke App A atau App B, serta membuat semua aplikasi bergantung pada ketersediaan Auth Provider. JWT mengurangi ketergantungan tersebut dengan tradeoff bahwa revocation tidak langsung terlihat sampai token kedaluwarsa atau resource server melakukan pemeriksaan tambahan.
