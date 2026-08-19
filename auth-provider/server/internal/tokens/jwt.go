@@ -91,6 +91,9 @@ func ValidateAccessToken(tokenString string, signingKey []byte, issuer, audience
 	if claims.ID == "" {
 		return nil, errors.New("tokens: jti is required")
 	}
+	if len(claims.Audience) != 1 || claims.Audience[0] != audience {
+		return nil, errors.New("tokens: exact audience is required")
+	}
 	if claims.Subject == "" {
 		return nil, errors.New("tokens: subject is required")
 	}

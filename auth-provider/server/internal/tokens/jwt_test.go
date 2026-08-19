@@ -124,3 +124,25 @@ func TestValidateAccessTokenRejectsAlgorithmSubstitution(t *testing.T) {
 		t.Fatalf("expected algorithm rejection, got %v", err)
 	}
 }
+
+func TestValidateAccessTokenRejectsAdditionalAudience(t *testing.T) {
+	claims := Claims{
+		Scope: DefaultScope,
+		SID:   "session",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    testIssuer,
+			Subject:   "user-uuid",
+			Audience:  jwt.ClaimStrings{testAudience, "another-application"},
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute)),
+			ID:        "multi-audience-token",
+		},
+	}
+	tokenString, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(testKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateAccessToken(tokenString, []byte(testKey), testIssuer, testAudience); err == nil {
+		t.Fatal("expected multi-audience token to fail")
+	}
+}
