@@ -7,6 +7,7 @@ import (
 
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/models"
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -75,7 +76,7 @@ func (r *MFARepository) Consume(ctx context.Context, id uuid.UUID) error {
 func (r *MFARepository) ConsumeAndCreateSession(ctx context.Context, id uuid.UUID, session *models.SSOSession, maxAttempts int) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&models.MFALoginChallenge{}).
-			Where("id = ? AND used_at IS NULL AND expires_at > ? AND attempts < ?", id, time.Now(), maxAttempts).
+			Where("id = ? AND used_at IS NULL AND expires_at > ? AND attempts <= ?", id, time.Now(), maxAttempts).
 			Updates(map[string]any{"used_at": gorm.Expr("NOW()")})
 		if result.Error != nil {
 			return result.Error
@@ -134,4 +135,118 @@ func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*models
 		return nil, err
 	}
 	return &user, nil
+}
+
+func (r *UserRepository) FindByID(ctx context.Context, id uuid.UUID) (*models.User, error) {
+	var user models.User
+	err := r.db.WithContext(ctx).Where("id = ?", id).First(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func (r *UserRepository) List(ctx context.Context) ([]models.User, error) {
+	var users []models.User
+	err := r.db.WithContext(ctx).Order("created_at ASC").Find(&users).Error
+	return users, err
+}
+
+func (r *UserRepository) CreateUser(ctx context.Context, name, email, password, status string) (*models.User, error) {
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, err
+	}
+	if status == "" {
+		status = "active"
+	}
+	user := &models.User{Name: name, Email: email, PasswordHash: string(passwordHash), Status: status}
+	if err := r.db.WithContext(ctx).Create(user).Error; err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+func (r *UserRepository) UpdateUser(ctx context.Context, id uuid.UUID, name, email, password *string) (*models.User, error) {
+	return r.updateUser(ctx, r.db.WithContext(ctx), id, name, email, password, false)
+}
+
+func (r *UserRepository) UpdateUserAndRevoke(ctx context.Context, id uuid.UUID, name, email, password *string) (*models.User, error) {
+	var user *models.User
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var err error
+		user, err = r.updateUser(ctx, tx, id, name, email, password, true)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return r.FindByID(ctx, user.ID)
+}
+
+func (r *UserRepository) updateUser(ctx context.Context, db *gorm.DB, id uuid.UUID, name, email, password *string, revokeSessions bool) (*models.User, error) {
+	updates := make(map[string]any)
+	if name != nil {
+		updates["name"] = *name
+	}
+	if email != nil {
+		updates["email"] = *email
+	}
+	if password != nil {
+		passwordHash, err := bcrypt.GenerateFromPassword([]byte(*password), bcrypt.DefaultCost)
+		if err != nil {
+			return nil, err
+		}
+		updates["password_hash"] = string(passwordHash)
+	}
+	if len(updates) == 0 {
+		return r.FindByID(ctx, id)
+	}
+	result := db.WithContext(ctx).Model(&models.User{}).Where("id = ?", id).Updates(updates)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return nil, ErrUserNotFound
+	}
+	if revokeSessions && password != nil {
+		var sessions []models.SSOSession
+		if err := db.WithContext(ctx).Where("user_id = ? AND status = ? AND revoked_at IS NULL", id, "active").Find(&sessions).Error; err != nil {
+			return nil, err
+		}
+		for i := range sessions {
+			if err := db.WithContext(ctx).Model(&models.SSOSession{}).
+				Where("id = ? AND status = ? AND revoked_at IS NULL", sessions[i].ID, "active").
+				Updates(map[string]any{"status": "revoked", "revoked_at": time.Now(), "revoke_reason": "password_changed"}).Error; err != nil {
+				return nil, err
+			}
+			if err := createSessionRevokedEvent(db.WithContext(ctx), &sessions[i], "password_changed"); err != nil {
+				return nil, err
+			}
+		}
+	}
+	var user models.User
+	if err := db.WithContext(ctx).Where("id = ?", id).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, err
+	}
+	return &user, nil
+}
+
+func (r *UserRepository) SetStatus(ctx context.Context, id uuid.UUID, status string) error {
+	result := r.db.WithContext(ctx).Model(&models.User{}).
+		Where("id = ?", id).
+		Update("status", status)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrUserNotFound
+	}
+	return nil
 }

@@ -44,3 +44,28 @@ func TestApplicationExactRedirectURIUsesEqualityPredicate(t *testing.T) {
 		t.Fatalf("generated redirect query %q does not use exact equality", query)
 	}
 }
+
+func TestMFAFinalReservedAttemptCanCreateSession(t *testing.T) {
+	db := dryRunDB(t)
+	query := db.ToSQL(func(tx *gorm.DB) *gorm.DB {
+		return tx.WithContext(context.Background()).Model(&models.MFALoginChallenge{}).
+			Where("id = ? AND used_at IS NULL AND expires_at > ? AND attempts <= ?", uuid.New(), "now", 5).
+			Updates(map[string]any{"used_at": gorm.Expr("NOW()")})
+	})
+	if !regexp.MustCompile(`(?i)attempts\s*<=`).MatchString(query) {
+		t.Fatalf("MFA consume query rejects final reserved attempt: %q", query)
+	}
+}
+
+func TestSessionRevokedEventPayloadContainsRequiredFields(t *testing.T) {
+	session := &models.SSOSession{ID: uuid.New(), UserID: uuid.New()}
+	event := buildSessionRevokedEvent(session, "sso_logout")
+	for _, key := range []string{"eventId", "eventType", "userId", "centralSessionId", "applicationId", "reason", "occurredAt", "metadata"} {
+		if _, ok := event.Payload[key]; !ok {
+			t.Fatalf("event payload missing %q: %+v", key, event.Payload)
+		}
+	}
+	if event.Payload["eventId"] != event.ID.String() || event.Payload["eventType"] != models.EventSessionRevoked || event.Payload["reason"] != "sso_logout" {
+		t.Fatalf("event payload identity fields incorrect: %+v", event.Payload)
+	}
+}

@@ -69,6 +69,17 @@ CREATE TABLE IF NOT EXISTS sso_sessions (
     ip_address         VARCHAR(64),
     user_agent         TEXT
 );
+
+CREATE TABLE IF NOT EXISTS mfa_login_challenges (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash VARCHAR(255) NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    used_at    TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS idx_sso_sessions_user_id ON sso_sessions(user_id);
 
 CREATE TABLE IF NOT EXISTS authorization_codes (

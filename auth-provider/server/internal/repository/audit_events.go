@@ -3,8 +3,10 @@ package repository
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/models"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -27,12 +29,28 @@ func (r *EventRepository) CreateSessionRevokedEvent(ctx context.Context, session
 }
 
 func createSessionRevokedEvent(db *gorm.DB, session *models.SSOSession, reason string) error {
-	event := &models.Event{
+	return db.Create(buildSessionRevokedEvent(session, reason)).Error
+}
+
+func buildSessionRevokedEvent(session *models.SSOSession, reason string) *models.Event {
+	eventID := uuid.New()
+	occurredAt := time.Now().UTC()
+	return &models.Event{
+		ID:               eventID,
 		EventType:        models.EventSessionRevoked,
 		UserID:           session.UserID,
 		CentralSessionID: &session.ID,
-		Payload:          map[string]any{"reason": reason},
-		Status:           "pending",
+		Payload: map[string]any{
+			"eventId":          eventID.String(),
+			"eventType":        models.EventSessionRevoked,
+			"userId":           session.UserID.String(),
+			"centralSessionId": session.ID.String(),
+			"applicationId":    nil,
+			"reason":           reason,
+			"occurredAt":       occurredAt.Format(time.RFC3339Nano),
+			"metadata":         map[string]any{},
+		},
+		Status:    "pending",
+		CreatedAt: occurredAt,
 	}
-	return db.Create(event).Error
 }

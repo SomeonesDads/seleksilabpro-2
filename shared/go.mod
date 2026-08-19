@@ -1,4 +1,4 @@
-module github.com/bendev/oskm-sso/shared
+module github.com/SomeonesDads/seleksilabpro-2/shared
 
 go 1.22
 
