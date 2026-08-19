@@ -18,6 +18,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+const testPKCEChallenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+
 type flowUsers struct {
 	user        models.User
 	missingByID bool
@@ -220,7 +222,7 @@ func TestLoginIntentIsRevalidatedAgainstAuthorizationRequest(t *testing.T) {
 		Applications: &flowApplications{application: application},
 	}, AuthHandlerConfig{}, nil)
 
-	invalidIntent := "/authorize?response_type=code&client_id=app-client&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback.evil&state=state&code_challenge=challenge&code_challenge_method=S256"
+	invalidIntent := "/authorize?response_type=code&client_id=app-client&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback.evil&state=state&code_challenge=" + testPKCEChallenge + "&code_challenge_method=S256"
 	pageRequest := httptest.NewRequest(http.MethodGet, "/login?return_to="+url.QueryEscape(invalidIntent), nil)
 	pageResponse := httptest.NewRecorder()
 	handler.LoginPage(pageResponse, pageRequest)
@@ -391,7 +393,7 @@ func TestAuthorizeMissingUserAuditsPolicyDenied(t *testing.T) {
 		Audit:             audit,
 	}, AuthHandlerConfig{}, nil)
 
-	request := httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&client_id=app-client&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback&state=state&code_challenge=challenge&code_challenge_method=S256", nil)
+	request := httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&client_id=app-client&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback&state=state&code_challenge="+testPKCEChallenge+"&code_challenge_method=S256", nil)
 	request.AddCookie(&http.Cookie{Name: ssoSessionCookie, Value: rawSession})
 	response := httptest.NewRecorder()
 	handler.Authorize(response, request)
@@ -412,11 +414,80 @@ func TestAuthorizeRejectsUnvalidatedRedirect(t *testing.T) {
 	handler := NewAuthHandlerWithDependencies(AuthRepositories{
 		Applications: &flowApplications{application: application},
 	}, AuthHandlerConfig{}, nil)
-	request := httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&client_id=app-client&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback.evil&state=state&code_challenge=challenge&code_challenge_method=S256", nil)
+	request := httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&client_id=app-client&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback.evil&state=state&code_challenge="+testPKCEChallenge+"&code_challenge_method=S256", nil)
 	response := httptest.NewRecorder()
 	handler.Authorize(response, request)
 	if response.Code != http.StatusBadRequest || response.Header().Get("Location") != "" {
 		t.Fatalf("invalid redirect was not rejected safely: status=%d location=%q", response.Code, response.Header().Get("Location"))
+	}
+}
+
+func TestAuthorizeRedirectsUnauthenticatedRequestBeforePolicyDependencies(t *testing.T) {
+	application := models.Application{ID: uuid.New(), ClientID: "app-client", Status: "active"}
+	handler := NewAuthHandlerWithDependencies(AuthRepositories{
+		Applications: &flowApplications{application: application},
+	}, AuthHandlerConfig{}, nil)
+	request := httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&client_id=app-client&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback&state=state&code_challenge="+testPKCEChallenge+"&code_challenge_method=S256", nil)
+	response := httptest.NewRecorder()
+	handler.Authorize(response, request)
+
+	location, err := url.Parse(response.Header().Get("Location"))
+	if response.Code != http.StatusFound || err != nil || location.Path != "/login" || location.Query().Get("return_to") == "" {
+		t.Fatalf("unauthenticated request was not sent to login: status=%d location=%q", response.Code, response.Header().Get("Location"))
+	}
+}
+
+func TestAuthorizeInactiveUserReturnsToLogin(t *testing.T) {
+	user := models.User{ID: uuid.New(), Status: "inactive"}
+	application := models.Application{ID: uuid.New(), ClientID: "app-client", Status: "active"}
+	rawSession := "session-token"
+	session := &models.SSOSession{ID: uuid.New(), UserID: user.ID, SessionTokenHash: idgen.HashToken(rawSession), Status: "active", ExpiresAt: time.Now().Add(time.Hour)}
+	audit := &flowAudit{}
+	handler := NewAuthHandlerWithDependencies(AuthRepositories{
+		Users:             &flowUsers{user: user},
+		Applications:      &flowApplications{application: application},
+		Policies:          flowPolicy{allowed: true},
+		Sessions:          &flowSessions{byHash: map[string]*models.SSOSession{session.SessionTokenHash: session}},
+		AuthorizationCode: &flowCodes{},
+		Audit:             audit,
+	}, AuthHandlerConfig{}, nil)
+	request := httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&client_id=app-client&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback&state=state&code_challenge="+testPKCEChallenge+"&code_challenge_method=S256", nil)
+	request.AddCookie(&http.Cookie{Name: ssoSessionCookie, Value: rawSession})
+	response := httptest.NewRecorder()
+	handler.Authorize(response, request)
+
+	location, err := url.Parse(response.Header().Get("Location"))
+	if response.Code != http.StatusFound || err != nil || location.Path != "/login" || location.Query().Get("return_to") == "" {
+		t.Fatalf("inactive user was not sent to login: status=%d location=%q", response.Code, response.Header().Get("Location"))
+	}
+	if len(audit.events) != 1 || audit.events[0].EventType != "PolicyDenied" {
+		t.Fatalf("inactive-user denial was not audited: %+v", audit.events)
+	}
+}
+
+func TestAuthorizeRejectsDuplicateOAuthParameters(t *testing.T) {
+	application := models.Application{ID: uuid.New(), ClientID: "app-client", Status: "active"}
+	handler := NewAuthHandlerWithDependencies(AuthRepositories{
+		Applications: &flowApplications{application: application},
+	}, AuthHandlerConfig{}, nil)
+	request := httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&response_type=token&client_id=app-client&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback&state=state&code_challenge="+testPKCEChallenge+"&code_challenge_method=S256", nil)
+	response := httptest.NewRecorder()
+	handler.Authorize(response, request)
+	if response.Code != http.StatusBadRequest || response.Header().Get("Location") != "" {
+		t.Fatalf("duplicate OAuth parameter was accepted: status=%d location=%q", response.Code, response.Header().Get("Location"))
+	}
+}
+
+func TestAuthorizeRejectsInvalidS256Challenge(t *testing.T) {
+	application := models.Application{ID: uuid.New(), ClientID: "app-client", Status: "active"}
+	handler := NewAuthHandlerWithDependencies(AuthRepositories{
+		Applications: &flowApplications{application: application},
+	}, AuthHandlerConfig{}, nil)
+	request := httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&client_id=app-client&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback&state=state&code_challenge=challenge&code_challenge_method=S256", nil)
+	response := httptest.NewRecorder()
+	handler.Authorize(response, request)
+	if response.Code != http.StatusBadRequest || response.Header().Get("Location") != "" {
+		t.Fatalf("invalid PKCE challenge was accepted: status=%d location=%q", response.Code, response.Header().Get("Location"))
 	}
 }
 
@@ -434,7 +505,7 @@ func TestAuthorizePolicyDeniedAuditsAndRedirects(t *testing.T) {
 		AuthorizationCode: &flowCodes{},
 		Audit:             audit,
 	}, AuthHandlerConfig{}, nil)
-	request := httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&client_id=app-client&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback&state=state&code_challenge=challenge&code_challenge_method=S256", nil)
+	request := httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&client_id=app-client&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback&state=state&code_challenge="+testPKCEChallenge+"&code_challenge_method=S256", nil)
 	request.AddCookie(&http.Cookie{Name: ssoSessionCookie, Value: rawSession})
 	response := httptest.NewRecorder()
 	handler.Authorize(response, request)
@@ -451,7 +522,7 @@ func TestAuthorizeRejectsUnknownInactiveAndInvalidSessionsSafely(t *testing.T) {
 	baseApplication := models.Application{ID: uuid.New(), ClientID: "app-client", Status: "active"}
 	baseUser := models.User{ID: uuid.New(), Status: "active"}
 	authorizeRequest := func(cookieValue string) *http.Request {
-		request := httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&client_id=app-client&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback&state=state&code_challenge=challenge&code_challenge_method=S256", nil)
+		request := httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&client_id=app-client&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback&state=state&code_challenge="+testPKCEChallenge+"&code_challenge_method=S256", nil)
 		if cookieValue != "" {
 			request.AddCookie(&http.Cookie{Name: ssoSessionCookie, Value: cookieValue})
 		}
