@@ -749,9 +749,9 @@ func (h *AuthHandler) UserInfo(w http.ResponseWriter, r *http.Request) {
 //  5. Return 200 immediately — do NOT wait for App A/B to actually log out.
 //     The outbox publisher + Sync Worker handle propagation asynchronously.
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
-	clearAuthCookie(w, ssoSessionCookie)
 	cookie, err := r.Cookie(ssoSessionCookie)
 	if err != nil || cookie.Value == "" {
+		clearAuthCookie(w, ssoSessionCookie)
 		h.audit(r, "Logout", "success", nil, nil, nil, nil)
 		_ = writeJSON(w, http.StatusOK, map[string]any{"logged_out": true})
 		return
@@ -763,6 +763,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	session, err := h.sessionLookup().FindActiveByTokenHash(r.Context(), idgen.HashToken(cookie.Value))
 	if err != nil {
 		if errors.Is(err, repository.ErrSessionNotFound) {
+			clearAuthCookie(w, ssoSessionCookie)
 			h.audit(r, "Logout", "success", nil, nil, nil, nil)
 			_ = writeJSON(w, http.StatusOK, map[string]any{"logged_out": true})
 			return
@@ -772,6 +773,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if session == nil {
+		clearAuthCookie(w, ssoSessionCookie)
 		h.audit(r, "Logout", "success", nil, nil, nil, nil)
 		_ = writeJSON(w, http.StatusOK, map[string]any{"logged_out": true})
 		return
@@ -781,6 +783,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "logout unavailable")
 		return
 	}
+	clearAuthCookie(w, ssoSessionCookie)
 	h.audit(r, "Logout", "success", &session.UserID, nil, &session.ID, nil)
 	_ = writeJSON(w, http.StatusOK, map[string]any{"logged_out": true})
 }
