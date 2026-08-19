@@ -407,17 +407,18 @@ func (h *AuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.sessionLookup() == nil || h.userProfiles() == nil || h.Policies == nil || h.AuthorizationCodes == nil {
-		h.log().Error("authorization repositories are not configured")
-		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "authorization unavailable")
-		return
-	}
 	cookie, cookieErr := r.Cookie(ssoSessionCookie)
 	if cookieErr != nil || cookie.Value == "" {
 		http.Redirect(w, r, loginRedirectTarget(r.URL.RequestURI()), http.StatusFound)
 		return
 	}
-	session, err := h.sessionLookup().FindActiveByTokenHash(r.Context(), idgen.HashToken(cookie.Value))
+	sessions := h.sessionLookup()
+	if sessions == nil {
+		h.log().Error("session repository is not configured")
+		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "authorization unavailable")
+		return
+	}
+	session, err := sessions.FindActiveByTokenHash(r.Context(), idgen.HashToken(cookie.Value))
 	if err != nil {
 		if errors.Is(err, repository.ErrSessionNotFound) {
 			http.Redirect(w, r, loginRedirectTarget(r.URL.RequestURI()), http.StatusFound)
@@ -431,7 +432,13 @@ func (h *AuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, loginRedirectTarget(r.URL.RequestURI()), http.StatusFound)
 		return
 	}
-	user, err := h.userProfiles().FindByID(r.Context(), session.UserID)
+	profiles := h.userProfiles()
+	if profiles == nil || h.Policies == nil || h.AuthorizationCodes == nil {
+		h.log().Error("authorization repositories are not configured")
+		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "authorization unavailable")
+		return
+	}
+	user, err := profiles.FindByID(r.Context(), session.UserID)
 	if err != nil {
 		if errors.Is(err, repository.ErrUserNotFound) {
 			h.audit(r, "PolicyDenied", "failed", nil, &app.ID, &session.ID, nil)
@@ -448,6 +455,10 @@ func (h *AuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		} else {
 			h.audit(r, "PolicyDenied", "failed", nil, &app.ID, &session.ID, nil)
 		}
+		if user != nil && !user.IsActive() {
+			http.Redirect(w, r, loginRedirectTarget(r.URL.RequestURI()), http.StatusFound)
+			return
+		}
 		redirectOAuthError(w, r, req.RedirectURI, req.State, "access_denied")
 		return
 	}
@@ -463,6 +474,12 @@ func (h *AuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	target, err := url.Parse(req.RedirectURI)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidRequest, "authorization request invalid")
+		return
+	}
+	now := time.Now()
 	rawCode, err := idgen.RandomToken(32)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "authorization unavailable")
@@ -476,7 +493,8 @@ func (h *AuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		RedirectURI:         req.RedirectURI,
 		CodeChallenge:       req.CodeChallenge,
 		CodeChallengeMethod: req.CodeChallengeMethod,
-		ExpiresAt:           time.Now().Add(h.authCodeTTL()),
+		CreatedAt:           now,
+		ExpiresAt:           now.Add(h.authCodeTTL()),
 	}
 	if err := h.AuthorizationCodes.Create(r.Context(), code); err != nil {
 		h.log().Error("authorization code creation failed", slog.Any("err", err))
@@ -484,12 +502,6 @@ func (h *AuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, "AuthorizationCodeIssued", "success", &user.ID, &app.ID, &session.ID, nil)
-	target, err := url.Parse(req.RedirectURI)
-	if err != nil {
-		h.log().Error("validated redirect URI could not be parsed", slog.Any("err", err))
-		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "authorization unavailable")
-		return
-	}
 	query := target.Query()
 	query.Set("code", rawCode)
 	query.Set("state", req.State)
