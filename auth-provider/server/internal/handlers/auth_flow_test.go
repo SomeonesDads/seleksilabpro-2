@@ -3,10 +3,12 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,7 +45,10 @@ func (s *flowUsers) FindByID(_ context.Context, id uuid.UUID) (*models.User, err
 }
 
 type flowApplications struct {
-	application models.Application
+	application    models.Application
+	clientSecretOK *bool
+	verifiedClient string
+	verifiedSecret string
 }
 
 func (s *flowApplications) FindByClientID(_ context.Context, clientID string) (*models.Application, error) {
@@ -57,7 +62,12 @@ func (s *flowApplications) HasExactRedirectURI(_ context.Context, id uuid.UUID, 
 	return id == s.application.ID && redirectURI == "https://app.example/callback", nil
 }
 
-func (s *flowApplications) VerifyClientSecret(context.Context, string, string) (bool, error) {
+func (s *flowApplications) VerifyClientSecret(_ context.Context, clientID, clientSecret string) (bool, error) {
+	s.verifiedClient = clientID
+	s.verifiedSecret = clientSecret
+	if s.clientSecretOK != nil {
+		return *s.clientSecretOK, nil
+	}
 	return true, nil
 }
 
@@ -93,7 +103,7 @@ func (s *flowSessions) FindActiveByTokenHash(_ context.Context, hash string) (*m
 }
 
 func (s *flowSessions) FindActiveByID(_ context.Context, id uuid.UUID) (*models.SSOSession, error) {
-	if s.created == nil || s.created.ID != id || s.revoked {
+	if s.created == nil || s.created.ID != id || s.revoked || !s.created.IsValid(time.Now()) {
 		return nil, repository.ErrSessionNotFound
 	}
 	return s.created, nil
@@ -105,10 +115,15 @@ func (s *flowSessions) RevokeAndCreateEvent(context.Context, uuid.UUID, string) 
 }
 
 type flowCodes struct {
-	code *models.AuthorizationCode
+	code      *models.AuthorizationCode
+	tokens    AccessTokenStore
+	redeemErr error
+	mu        sync.Mutex
 }
 
 func (s *flowCodes) Create(_ context.Context, code *models.AuthorizationCode) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if code.ID == uuid.Nil {
 		code.ID = uuid.New()
 	}
@@ -116,14 +131,19 @@ func (s *flowCodes) Create(_ context.Context, code *models.AuthorizationCode) er
 	return nil
 }
 
-func (s *flowCodes) FindByHash(context.Context, string) (*models.AuthorizationCode, error) {
-	if s.code == nil {
+func (s *flowCodes) FindByHash(_ context.Context, codeHash string) (*models.AuthorizationCode, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.code == nil || s.code.CodeHash != codeHash {
 		return nil, repository.ErrAuthorizationCodeNotFound
 	}
-	return s.code, nil
+	copy := *s.code
+	return &copy, nil
 }
 
 func (s *flowCodes) ConsumeAtomically(context.Context, uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.code == nil || s.code.UsedAt != nil {
 		return repository.ErrAuthorizationCodeNotFound
 	}
@@ -132,11 +152,35 @@ func (s *flowCodes) ConsumeAtomically(context.Context, uuid.UUID) error {
 	return nil
 }
 
+func (s *flowCodes) Redeem(ctx context.Context, id uuid.UUID, token *models.AccessToken) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.code == nil || s.code.ID != id || s.code.UsedAt != nil || !time.Now().Before(s.code.ExpiresAt) {
+		return repository.ErrAuthorizationCodeNotFound
+	}
+	if s.redeemErr != nil {
+		return s.redeemErr
+	}
+	if s.tokens == nil {
+		return errors.New("token store is not configured")
+	}
+	if err := s.tokens.Create(ctx, token); err != nil {
+		return err
+	}
+	now := time.Now()
+	s.code.UsedAt = &now
+	return nil
+}
+
 type flowTokens struct {
-	token *models.AccessToken
+	token     *models.AccessToken
+	createErr error
 }
 
 func (s *flowTokens) Create(_ context.Context, token *models.AccessToken) error {
+	if s.createErr != nil {
+		return s.createErr
+	}
 	s.token = token
 	return nil
 }
@@ -278,8 +322,8 @@ func TestAuthFlowLoginAuthorizeTokenUserInfoLogout(t *testing.T) {
 	user := models.User{ID: uuid.New(), Name: "Ada", Email: "ada@example.com", PasswordHash: string(passwordHash), Status: "active"}
 	application := models.Application{ID: uuid.New(), Name: "App", ClientID: "app-client", Status: "active"}
 	sessions := &flowSessions{byHash: make(map[string]*models.SSOSession)}
-	codes := &flowCodes{}
 	tokensStore := &flowTokens{}
+	codes := &flowCodes{tokens: tokensStore}
 	audit := &flowAudit{}
 	handler := NewAuthHandlerWithDependencies(AuthRepositories{
 		Users:             &flowUsers{user: user},
@@ -580,13 +624,14 @@ func TestTokenRejectsWrongVerifierAndReplay(t *testing.T) {
 	verifier := "verifier"
 	rawCode := "authorization-code"
 	code := &models.AuthorizationCode{ID: uuid.New(), CodeHash: idgen.HashToken(rawCode), UserID: user.ID, ApplicationID: application.ID, SSOSessionID: session.ID, RedirectURI: "https://app.example/callback", CodeChallenge: idgen.PKCEChallengeS256(verifier), CodeChallengeMethod: "S256", ExpiresAt: time.Now().Add(time.Minute)}
-	codes := &flowCodes{code: code}
+	tokensStore := &flowTokens{}
+	codes := &flowCodes{code: code, tokens: tokensStore}
 	handler := NewAuthHandlerWithDependencies(AuthRepositories{
 		Users:             &flowUsers{user: user},
 		Applications:      &flowApplications{application: application},
 		Sessions:          &flowSessions{created: session, byHash: map[string]*models.SSOSession{session.SessionTokenHash: session}},
 		AuthorizationCode: codes,
-		AccessTokens:      &flowTokens{},
+		AccessTokens:      tokensStore,
 	}, AuthHandlerConfig{JWTSigningKey: []byte("test-signing-key")}, nil)
 
 	requestToken := func(codeVerifier string) *httptest.ResponseRecorder {
@@ -605,6 +650,54 @@ func TestTokenRejectsWrongVerifierAndReplay(t *testing.T) {
 	}
 	if response := requestToken(verifier); response.Code != http.StatusBadRequest {
 		t.Fatalf("authorization-code replay was accepted: status=%d", response.Code)
+	}
+}
+
+func TestTokenAcceptsBasicClientAuthenticationAndFormBody(t *testing.T) {
+	user := models.User{ID: uuid.New(), Status: "active"}
+	secretHash := "stored-client-secret-hash"
+	application := models.Application{ID: uuid.New(), ClientID: "confidential-client", ClientSecretHash: &secretHash, Status: "active"}
+	session := &models.SSOSession{ID: uuid.New(), UserID: user.ID, Status: "active", ExpiresAt: time.Now().Add(time.Hour)}
+	verifier := "verifier"
+	rawCode := "authorization-code"
+	tokensStore := &flowTokens{}
+	codes := &flowCodes{tokens: tokensStore, code: &models.AuthorizationCode{
+		ID:                  uuid.New(),
+		CodeHash:            idgen.HashToken(rawCode),
+		UserID:              user.ID,
+		ApplicationID:       application.ID,
+		SSOSessionID:        session.ID,
+		RedirectURI:         "https://app.example/callback",
+		CodeChallenge:       idgen.PKCEChallengeS256(verifier),
+		CodeChallengeMethod: "S256",
+		ExpiresAt:           time.Now().Add(time.Minute),
+	}}
+	applications := &flowApplications{application: application}
+	handler := NewAuthHandlerWithDependencies(AuthRepositories{
+		Users:             &flowUsers{user: user},
+		Applications:      applications,
+		Sessions:          &flowSessions{created: session},
+		AuthorizationCode: codes,
+		AccessTokens:      tokensStore,
+	}, AuthHandlerConfig{JWTSigningKey: []byte("test-signing-key")}, nil)
+
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {rawCode},
+		"redirect_uri":  {"https://app.example/callback"},
+		"code_verifier": {verifier},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.SetBasicAuth(application.ClientID, "client-secret")
+	response := httptest.NewRecorder()
+	handler.Token(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("token status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if applications.verifiedClient != application.ClientID || applications.verifiedSecret != "client-secret" {
+		t.Fatalf("client credentials were not passed to repository: client=%q secret=%q", applications.verifiedClient, applications.verifiedSecret)
 	}
 }
 
