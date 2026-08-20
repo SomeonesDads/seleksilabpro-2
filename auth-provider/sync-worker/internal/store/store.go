@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/sync-worker/internal/queue"
+	"github.com/SomeonesDads/seleksilabpro-2/shared/queue"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/sync-worker/internal/worker"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"

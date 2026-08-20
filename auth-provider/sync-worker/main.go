@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/sync-worker/internal/config"
-	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/sync-worker/internal/queue"
+	"github.com/SomeonesDads/seleksilabpro-2/shared/queue"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/sync-worker/internal/store"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/sync-worker/internal/worker"
 	"github.com/SomeonesDads/seleksilabpro-2/shared/logging"
