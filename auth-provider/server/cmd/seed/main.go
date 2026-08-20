@@ -1,14 +1,18 @@
-// cmd/seed is a placeholder for future idempotent demo-data seeding.
-// It currently does not insert any data.
+// Command seed provisions a repeatable demo environment for the Auth Provider
+// and its relying applications. It is idempotent: re-running it against the
+// same database never duplicates users, groups, applications, redirect URIs, or
+// policies. Raw credentials and internal auth tokens are printed once as the
+// provisioning output and are not persisted beyond that.
 package main
 
 import (
 	"context"
+	"fmt"
 	"log"
-	"log/slog"
 	"os"
 
 	appdb "github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/db"
+	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/seed"
 )
 
 func main() {
@@ -19,18 +23,24 @@ func main() {
 		log.Fatal("DATABASE_URL is required")
 	}
 
-	pool, err := appdb.Connect(ctx, dbURL)
-	if err != nil {
-		log.Fatalf("connect: %v", err)
+	if err := appdb.RunMigrations(ctx, dbURL, "migrations"); err != nil {
+		log.Fatalf("seed: migrations: %v", err)
 	}
-	defer pool.Close()
 
-	// TODO: replace with real seeding logic. Sketch below — make it
-	// idempotent (ON CONFLICT DO NOTHING / check-then-insert) so re-running
-	// `docker compose up` doesn't fail or duplicate rows.
+	gormDB, err := appdb.ConnectGORM(ctx, dbURL)
+	if err != nil {
+		log.Fatalf("seed: connect: %v", err)
+	}
+	sqlDB, err := gormDB.DB()
+	if err != nil {
+		log.Fatalf("seed: sql db: %v", err)
+	}
+	defer sqlDB.Close()
 
-	slog.Info("seed: TODO — insert demo admin user, a couple of groups " +
-		"(e.g. 'administrators', 'app-a-users', 'app-b-users'), App A and " +
-		"App B application rows with their client_id/redirect_uri, and " +
-		"application_group_policies granting access")
+	summary, err := seed.DefaultConfig().Seed(ctx, gormDB)
+	if err != nil {
+		log.Fatalf("seed: %v", err)
+	}
+
+	fmt.Print(summary.Render())
 }
