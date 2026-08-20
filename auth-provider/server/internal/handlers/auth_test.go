@@ -421,8 +421,20 @@ func TestUserInfoAcceptanceRejectsMalformedTokensAndReturnsSafeProfile(t *testin
 	if !ok || len(groups) != 1 || groups[0] != "app-users" {
 		t.Fatalf("groups missing from profile: %+v", profile)
 	}
+	// SPECS E: only sub, email, name, and groups may be returned. centralSessionId
+	// is internal metadata and must not leak here (relying apps derive it from
+	// the access-token `sid` claim instead).
+	allowed := map[string]bool{"sub": true, "email": true, "name": true, "groups" :true}
 	if len(profile) != 4 {
-		t.Fatalf("profile contains fields outside allowed UserInfo response: %+v", profile)
+		t.Fatalf("UserInfo returned unexpected field set: %+v", profile)
+	}
+	for key := range profile {
+		if !allowed[key] {
+			t.Fatalf("UserInfo returned unexpected field %q: %+v", key, profile)
+		}
+	}
+	if _, present := profile["centralSessionId"]; present {
+		t.Fatalf("UserInfo leaked internal metadata centralSessionId: %+v", profile)
 	}
 	for _, sensitive := range []string{"password", "password_hash", "client_secret", "session_token", "session_token_hash", "raw_token", "metadata"} {
 		if _, found := profile[sensitive]; found {

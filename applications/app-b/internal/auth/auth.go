@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -121,7 +122,34 @@ func (c *Client) FetchProfile(ctx context.Context, accessToken string) (*Profile
 	if profile.Sub == "" {
 		return nil, errors.New("userinfo returned empty subject")
 	}
+	// The Auth Provider no longer returns centralSessionId from /userinfo
+	// (only sub/email/name/groups per spec). The relying app derives the
+	// central session id from the access-token `sid` claim it already holds,
+	// which the server validated above.
+	profile.CentralSessionID = centralSessionIDFromToken(accessToken)
 	return &profile, nil
+}
+
+// centralSessionIDFromToken reads the `sid` claim (central session id) from a
+// signed access token without verifying the signature. The value is only used
+// as a correlation id for SSO revocation; the token itself has already been
+// validated by the Auth Provider via the /userinfo call above.
+func centralSessionIDFromToken(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		SID string `json:"sid"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	return claims.SID
 }
 
 func (c *Client) http() *http.Client {

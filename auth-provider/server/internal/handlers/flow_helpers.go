@@ -59,6 +59,13 @@ func decodeLoginInput(r *http.Request) (loginInput, error) {
 	if err := r.ParseForm(); err != nil {
 		return input, err
 	}
+	// Reject duplicate form parameters (notably return_to) so a login intent
+	// cannot be smuggled via a second value, mirroring /authorize validation.
+	for _, key := range []string{"email", "password", "return_to"} {
+		if len(r.PostForm[key]) > 1 {
+			return input, errors.New("duplicate " + key + " parameter")
+		}
+	}
 	input.Email = r.FormValue("email")
 	input.Password = r.FormValue("password")
 	input.ReturnTo = r.FormValue("return_to")
@@ -72,6 +79,13 @@ func decodeMFAInput(r *http.Request) (mfaInput, error) {
 	}
 	if err := r.ParseForm(); err != nil {
 		return input, err
+	}
+	// Reject duplicate form parameters (notably return_to) so a login intent
+	// cannot be smuggled via a second value, mirroring /login and /authorize.
+	for _, key := range []string{"code", "return_to"} {
+		if len(r.PostForm[key]) > 1 {
+			return input, errors.New("duplicate " + key + " parameter")
+		}
 	}
 	input.Code = r.FormValue("code")
 	input.ReturnTo = r.FormValue("return_to")

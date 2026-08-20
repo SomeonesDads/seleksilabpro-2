@@ -60,6 +60,12 @@ type AuthHandler struct {
 // Renders (or redirects to) the login page. If a valid central session
 // cookie is already present, this may be skipped entirely by /authorize.
 func (h *AuthHandler) LoginPage(w http.ResponseWriter, r *http.Request) {
+	// Reject duplicate return_to (login-intent) query parameters before
+	// trusting the first value, mirroring /authorize single-value validation.
+	if values := r.URL.Query()["return_to"]; len(values) > 1 {
+		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidRequest, "invalid login request")
+		return
+	}
 	intent, err := h.validateLoginIntent(r, r.URL.Query().Get("return_to"))
 	if err != nil {
 		if !errors.Is(err, errInvalidAuthorization) {
@@ -88,6 +94,7 @@ func (h *AuthHandler) LoginPage(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	input, err := decodeLoginInput(r)
 	if err != nil {
+		h.audit(r, "LoginFailed", "failed", nil, nil, nil, nil)
 		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid credentials")
 		return
 	}
@@ -919,7 +926,7 @@ func (h *AuthHandler) UserInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "user information unavailable")
 		return
 	}
-	_ = writeJSON(w, http.StatusOK, map[string]any{"sub": user.ID.String(), "email": user.Email, "name": user.Name, "groups": groups, "centralSessionId": activeSession.ID.String()})
+	_ = writeJSON(w, http.StatusOK, map[string]any{"sub": user.ID.String(), "email": user.Email, "name": user.Name, "groups": groups})
 }
 
 // POST /logout   (SSO / global logout, triggered from the Auth Portal UI)
