@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/sync-worker/internal/metrics"
 	"github.com/google/uuid"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -63,6 +64,7 @@ type Worker struct {
 	Store    DeliveryStore
 	Resolver TargetResolver
 	Client   *http.Client
+	Metrics  *metrics.Metrics
 
 	MaxRetries  int
 	BaseBackoff time.Duration
@@ -88,6 +90,7 @@ func New(logger *slog.Logger, store DeliveryStore, resolver TargetResolver, targ
 		Store:       store,
 		Resolver:    resolver,
 		Client:      &http.Client{Timeout: 15 * time.Second},
+		Metrics:     metrics.New(nil),
 		MaxRetries:  maxRetries,
 		BaseBackoff: baseBackoff,
 		MaxBackoff:  maxBackoff,
@@ -203,6 +206,7 @@ func (w *Worker) deliverTarget(ctx context.Context, payload EventPayload, target
 	if w.Store == nil {
 		return deliveryResult{err: errors.New("delivery store is not configured")}
 	}
+	app := appLabel(target)
 	for {
 		state, err := w.Store.BeginDelivery(ctx, payload.EventID, target.ApplicationID)
 		if err != nil {
@@ -218,9 +222,11 @@ func (w *Worker) deliverTarget(ctx context.Context, payload EventPayload, target
 		if attempt <= 0 {
 			return deliveryResult{err: errors.New("delivery attempt was not recorded")}
 		}
+		w.recordDeliveryAttempt(app, "attempt")
 
 		err = w.deliverToApp(ctx, target, payload)
 		if err == nil {
+			w.recordDeliverySuccess(app)
 			if markErr := w.Store.MarkDeliverySucceeded(ctx, payload.EventID, target.ApplicationID, time.Now().UTC()); markErr != nil {
 				return deliveryResult{err: markErr}
 			}
@@ -230,12 +236,14 @@ func (w *Worker) deliverTarget(ctx context.Context, payload EventPayload, target
 			return deliveryResult{err: ctx.Err()}
 		}
 		if attempt >= w.maxRetries() {
+			w.recordDeliveryPermanentFailure(app)
 			if markErr := w.Store.MarkDeliveryFailed(ctx, payload.EventID, target.ApplicationID, time.Now().UTC(), err); markErr != nil {
 				return deliveryResult{err: markErr}
 			}
 			return deliveryResult{failed: true}
 		}
 
+		w.recordDeliveryRetry(app)
 		nextRetryAt := time.Now().UTC().Add(backoffFor(attempt-1, w.BaseBackoff, w.MaxBackoff))
 		if markErr := w.Store.MarkDeliveryRetrying(ctx, payload.EventID, target.ApplicationID, nextRetryAt, err); markErr != nil {
 			return deliveryResult{err: markErr}
@@ -243,6 +251,38 @@ func (w *Worker) deliverTarget(ctx context.Context, payload EventPayload, target
 		if err := wait(ctx, time.Until(nextRetryAt)); err != nil {
 			return deliveryResult{err: err}
 		}
+	}
+}
+
+func appLabel(target AppTarget) string {
+	if target.Name != "" {
+		return target.Name
+	}
+	return target.ApplicationID.String()
+}
+
+func (w *Worker) recordDeliveryAttempt(app, status string) {
+	if w.Metrics != nil {
+		w.Metrics.DeliveryAttempt(app, status)
+	}
+}
+
+func (w *Worker) recordDeliverySuccess(app string) {
+	if w.Metrics != nil {
+		w.Metrics.DeliverySuccess()
+	}
+}
+
+func (w *Worker) recordDeliveryRetry(app string) {
+	if w.Metrics != nil {
+		w.Metrics.DeliveryRetry()
+	}
+}
+
+func (w *Worker) recordDeliveryPermanentFailure(app string) {
+	if w.Metrics != nil {
+		w.Metrics.DeliveryPermanentFailure()
+		w.Metrics.DLQEvent(app)
 	}
 }
 

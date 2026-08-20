@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/sync-worker/internal/metrics"
 	"github.com/google/uuid"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type fakeAcknowledger struct {
@@ -180,4 +184,57 @@ func TestHandleDeliveryDeadLettersMissingTargetConfiguration(t *testing.T) {
 	if ack.acks != 0 || len(ack.nacks) != 1 || ack.nacks[0] {
 		t.Fatalf("acknowledgement = acks:%d nacks:%v", ack.acks, ack.nacks)
 	}
+}
+
+func TestWorkerDeliveryMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+
+	appA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer appA.Close()
+	appB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer appB.Close()
+
+	appAID, appBID := uuid.New(), uuid.New()
+	payload := payloadFor(nil)
+	store := newFakeDeliveryStore()
+	ack := &fakeAcknowledger{}
+	w := New(nil, store, nil, []AppTarget{
+		{ApplicationID: appAID, Name: "app-a", LogoutNotifyURL: appA.URL, InternalAuthToken: "a-secret"},
+		{ApplicationID: appBID, Name: "app-b", LogoutNotifyURL: appB.URL, InternalAuthToken: "b-secret"},
+	}, 2, 0, 0)
+	w.Metrics = m
+
+	w.HandleDelivery(context.Background(), deliveryFor(ack, payload))
+
+	body := gatherMetrics(reg)
+	for _, want := range []string{
+		"worker_delivery_successes_total 1",
+		"worker_delivery_retries_total 1",
+		"worker_delivery_permanent_failures_total 1",
+		`worker_dlq_total{application="app-a"} 1`,
+		`worker_delivery_attempts_total{application="app-a",status="attempt"} 2`,
+		`worker_delivery_attempts_total{application="app-b",status="attempt"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics missing %q, got:\n%s", want, body)
+		}
+	}
+}
+
+func gatherMetrics(reg *prometheus.Registry) string {
+	srv := httptest.NewServer(promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	defer srv.Close()
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	buf := make([]byte, 16384)
+	n, _ := resp.Body.Read(buf)
+	return string(buf[:n])
 }

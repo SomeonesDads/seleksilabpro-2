@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -10,13 +12,15 @@ import (
 	"time"
 
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/sync-worker/internal/config"
-	"github.com/SomeonesDads/seleksilabpro-2/shared/queue"
+	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/sync-worker/internal/metrics"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/sync-worker/internal/store"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/sync-worker/internal/worker"
 	"github.com/SomeonesDads/seleksilabpro-2/shared/logging"
+	"github.com/SomeonesDads/seleksilabpro-2/shared/queue"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -49,6 +53,23 @@ func main() {
 		os.Exit(1)
 	}
 	dbStore := store.New(dbPool)
+
+	// Metrics (B02): expose worker delivery + dependency-health collectors.
+	metricsInstance := metrics.New(nil)
+	metricsAddr := os.Getenv("METRICS_ADDR")
+	if metricsAddr == "" {
+		metricsAddr = ":9091"
+	}
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("GET /metrics", promhttp.Handler())
+		logger.Info("metrics listening", slog.String("addr", metricsAddr))
+		if err := http.ListenAndServe(metricsAddr, mux); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("metrics server error", slog.Any("err", err))
+		}
+	}()
+	refreshWorkerMetricsOnce(logger, conn, dbPool, metricsInstance)
+	go refreshWorkerMetrics(signalCtx, logger, conn, dbPool, metricsInstance)
 
 	targets := make([]worker.AppTarget, 0, len(cfg.Targets))
 	for _, target := range cfg.Targets {
@@ -138,4 +159,29 @@ func drainWork(active *sync.WaitGroup, cancelWork context.CancelFunc, timeout ti
 		cancelWork()
 		return false
 	}
+}
+
+// refreshWorkerMetrics periodically updates the broker/db health gauges so
+// /metrics reflects live dependency state.
+func refreshWorkerMetrics(ctx context.Context, logger *slog.Logger, conn *queue.Connection, dbPool *pgxpool.Pool, m *metrics.Metrics) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			refreshWorkerMetricsOnce(logger, conn, dbPool, m)
+		}
+	}
+}
+
+// refreshWorkerMetricsOnce performs a single health-gauge refresh so the
+// /metrics endpoint reflects dependency state immediately at startup.
+func refreshWorkerMetricsOnce(logger *slog.Logger, conn *queue.Connection, dbPool *pgxpool.Pool, m *metrics.Metrics) {
+	dbUp := dbPool.Ping(context.Background()) == nil
+	brokerUp := !conn.IsClosed()
+	m.SetDBHealth(dbUp)
+	m.SetBrokerHealth(brokerUp)
+	logger.Debug("metrics refresh", slog.Bool("dbUp", dbUp), slog.Bool("brokerUp", brokerUp))
 }

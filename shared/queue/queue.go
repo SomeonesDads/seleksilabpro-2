@@ -109,6 +109,12 @@ func (c *Connection) Close() error {
 	return c.conn.Close()
 }
 
+// IsClosed reports whether the underlying AMQP connection is no longer usable,
+// used by health probes and the metrics dependency-health gauges.
+func (c *Connection) IsClosed() bool {
+	return c.conn.IsClosed()
+}
+
 // Publish sends a single event's JSON payload to the exchange. Called by
 // the outbox publisher loop, never directly from an HTTP handler.
 func (c *Connection) Publish(ctx context.Context, routingKey string, body []byte) error {
