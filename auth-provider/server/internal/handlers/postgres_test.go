@@ -19,11 +19,13 @@ import (
 	"time"
 
 	appdb "github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/db"
+	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/mfa"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/models"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/repository"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/tokens"
 	"github.com/SomeonesDads/seleksilabpro-2/shared/idgen"
 	"github.com/google/uuid"
+	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
@@ -640,5 +642,221 @@ func TestPostgresAuthFlowLoginAuthorizeTokenUserInfoLogoutAndOutbox(t *testing.T
 		if count != 1 {
 			t.Fatalf("audit event %q count = %d, want 1", eventType, count)
 		}
+	}
+}
+
+// TestPostgresPolicyDeletionRevokesAppTokensAndEmitsEvent verifies Decision 016:
+// deleting an allow policy revokes only the affected application's access-token
+// metadata (not the central SSO session, not unrelated applications) and emits a
+// single AccessPolicyChanged outbox event.
+func TestPostgresPolicyDeletionRevokesAppTokensAndEmitsEvent(t *testing.T) {
+	db := openAcceptancePostgres(t)
+	fixture := seedPostgresFlowFixture(t, db, true)
+
+	var policy models.ApplicationGroupPolicy
+	if err := db.First(&policy, "application_id = ?", fixture.application.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// Active access token for the application whose policy will be deleted.
+	appToken := &models.AccessToken{
+		JTI:           uuid.New(),
+		UserID:        fixture.user.ID,
+		ApplicationID: fixture.application.ID,
+		SessionID:     fixture.session.ID,
+		ExpiresAt:     time.Now().Add(time.Hour),
+	}
+	if err := db.Create(appToken).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// Unrelated application the user keeps access to via a separate policy.
+	otherApp := models.Application{ID: uuid.New(), Name: "Other App", ClientID: "other-client-" + uuid.NewString(), Status: "active", LogoutNotificationURL: "http://other.example/internal/logout"}
+	otherGroup := models.Group{ID: uuid.New(), Name: "other-users-" + uuid.NewString()}
+	if err := db.Create(&otherApp).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&otherGroup).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.UserGroup{ID: uuid.New(), UserID: fixture.user.ID, GroupID: otherGroup.ID}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.ApplicationGroupPolicy{ID: uuid.New(), ApplicationID: otherApp.ID, GroupID: otherGroup.ID, Effect: "allow"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	otherToken := &models.AccessToken{
+		JTI:           uuid.New(),
+		UserID:        fixture.user.ID,
+		ApplicationID: otherApp.ID,
+		SessionID:     fixture.session.ID,
+		ExpiresAt:     time.Now().Add(time.Hour),
+	}
+	if err := db.Create(otherToken).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	adminH := NewAdminHandler(AdminRepositories{Policies: repository.NewPolicyRepository(db)}, nil)
+	request := httptest.NewRequest(http.MethodDelete, "/admin/applications/"+fixture.application.ID.String()+"?group_id="+policy.GroupID.String(), nil)
+	request.SetPathValue("id", fixture.application.ID.String())
+	response := httptest.NewRecorder()
+	adminH.DeleteApplicationGroupPolicy(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("policy deletion failed: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	var revokedToken models.AccessToken
+	if err := db.First(&revokedToken, "jti = ?", appToken.JTI).Error; err != nil {
+		t.Fatal(err)
+	}
+	if revokedToken.RevokedAt == nil {
+		t.Fatalf("affected application access token was not revoked: %+v", revokedToken)
+	}
+
+	var preservedToken models.AccessToken
+	if err := db.First(&preservedToken, "jti = ?", otherToken.JTI).Error; err != nil {
+		t.Fatal(err)
+	}
+	if preservedToken.RevokedAt != nil {
+		t.Fatalf("unrelated application access token was wrongly revoked: %+v", preservedToken)
+	}
+
+	var session models.SSOSession
+	if err := db.First(&session, "id = ?", fixture.session.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if session.Status != "active" || session.RevokedAt != nil {
+		t.Fatalf("central SSO session was wrongly revoked: %+v", session)
+	}
+
+	var eventCount int64
+	if err := db.Model(&models.Event{}).
+		Where("event_type = ? AND user_id = ? AND application_id = ?", models.EventAccessPolicyChanged, fixture.user.ID, fixture.application.ID).
+		Count(&eventCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("AccessPolicyChanged event count = %d, want 1", eventCount)
+	}
+}
+
+// TestPostgresMFAEnrollmentRequiresConfirmationBeforeLogin verifies the
+// pending/enrolled split: a pending (unconfirmed) credential does NOT require
+// MFA at login, while a confirmed one does.
+func TestPostgresMFAEnrollmentRequiresConfirmationBeforeLogin(t *testing.T) {
+	db := openAcceptancePostgres(t)
+	mfaKey := []byte("integration-mfa-key-0123456789xy")
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte("password"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := models.User{ID: uuid.New(), Name: "Ada", Email: "ada-" + uuid.NewString() + "@example.com", PasswordHash: string(passwordHash), Status: "active"}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	rawToken := "mfa-test-session-" + uuid.NewString()
+	session := models.SSOSession{ID: uuid.New(), UserID: user.ID, SessionTokenHash: idgen.HashToken(rawToken), Status: "active", ExpiresAt: time.Now().Add(time.Hour)}
+	if err := db.Create(&session).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	users := repository.NewUserRepository(db)
+	totpRepo := repository.NewTOTPRepository(db)
+	sessionRepo := repository.NewSessionRepository(db)
+	authH := NewAuthHandlerWithDependencies(AuthRepositories{
+		Users:             users,
+		UserProfiles:      users,
+		TOTP:              totpRepo,
+		MFA:               repository.NewMFARepository(db),
+		Sessions:          sessionRepo,
+		SessionLookup:     sessionRepo,
+		SessionRevocation: sessionRepo,
+	}, AuthHandlerConfig{
+		JWTIssuer:        "auth-provider",
+		JWTSigningKey:    []byte(integrationJWTKey),
+		TokenStrategy:    "jwt",
+		MFAEncryptionKey: mfaKey,
+	}, nil)
+	authH.VerifyMFA = mfa.NewTOTPVerifier(totpRepo, mfaKey).Verify
+
+	loginBody := `{"email":"` + user.Email + `","password":"password"}`
+
+	// No TOTP yet: login succeeds without MFA.
+	noMFALoginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(loginBody))
+	noMFALoginReq.Header.Set("Content-Type", "application/json")
+	noMFALogin := httptest.NewRecorder()
+	authH.Login(noMFALogin, noMFALoginReq)
+	if noMFALogin.Code != http.StatusOK {
+		t.Fatalf("login without MFA failed: status=%d body=%s", noMFALogin.Code, noMFALogin.Body.String())
+	}
+	var noMFAProfile map[string]any
+	if err := json.Unmarshal(noMFALogin.Body.Bytes(), &noMFAProfile); err != nil {
+		t.Fatal(err)
+	}
+	if noMFAProfile["mfa_required"] != false {
+		t.Fatalf("expected mfa_required=false before enrollment, got %+v", noMFAProfile)
+	}
+
+	// Begin enrollment.
+	enrollReq := httptest.NewRequest(http.MethodPost, "/mfa/enroll", nil)
+	enrollReq.AddCookie(&http.Cookie{Name: ssoSessionCookie, Value: rawToken})
+	enrollResp := httptest.NewRecorder()
+	authH.EnrollMFA(enrollResp, enrollReq)
+	if enrollResp.Code != http.StatusOK {
+		t.Fatalf("enrollment failed: status=%d body=%s", enrollResp.Code, enrollResp.Body.String())
+	}
+	var enrollBody map[string]any
+	if err := json.Unmarshal(enrollResp.Body.Bytes(), &enrollBody); err != nil {
+		t.Fatal(err)
+	}
+	secret, _ := enrollBody["secret"].(string)
+	if secret == "" {
+		t.Fatalf("enrollment did not return a secret: %+v", enrollBody)
+	}
+
+	// Pending credential must NOT require MFA at login.
+	pendingLoginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(loginBody))
+	pendingLoginReq.Header.Set("Content-Type", "application/json")
+	pendingLogin := httptest.NewRecorder()
+	authH.Login(pendingLogin, pendingLoginReq)
+	if pendingLogin.Code != http.StatusOK {
+		t.Fatalf("login with pending MFA failed: status=%d body=%s", pendingLogin.Code, pendingLogin.Body.String())
+	}
+	var pendingProfile map[string]any
+	if err := json.Unmarshal(pendingLogin.Body.Bytes(), &pendingProfile); err != nil {
+		t.Fatal(err)
+	}
+	if pendingProfile["mfa_required"] != false {
+		t.Fatalf("pending MFA must not block login: %+v", pendingProfile)
+	}
+
+	// Confirm with a valid code.
+	code, err := totp.GenerateCode(secret, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmReq := httptest.NewRequest(http.MethodPost, "/mfa/enroll/confirm", strings.NewReader(`{"code":"`+code+`"}`))
+	confirmReq.AddCookie(&http.Cookie{Name: ssoSessionCookie, Value: rawToken})
+	confirmResp := httptest.NewRecorder()
+	authH.ConfirmMFAEnrollment(confirmResp, confirmReq)
+	if confirmResp.Code != http.StatusOK {
+		t.Fatalf("MFA confirm failed: status=%d body=%s", confirmResp.Code, confirmResp.Body.String())
+	}
+
+	// Now login must require MFA.
+	confirmedLoginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(loginBody))
+	confirmedLoginReq.Header.Set("Content-Type", "application/json")
+	confirmedLogin := httptest.NewRecorder()
+	authH.Login(confirmedLogin, confirmedLoginReq)
+	if confirmedLogin.Code != http.StatusOK {
+		t.Fatalf("confirmed login unexpected status: %d body=%s", confirmedLogin.Code, confirmedLogin.Body.String())
+	}
+	var confirmedProfile map[string]any
+	if err := json.Unmarshal(confirmedLogin.Body.Bytes(), &confirmedProfile); err != nil {
+		t.Fatal(err)
+	}
+	if confirmedProfile["mfa_required"] != true {
+		t.Fatalf("confirmed MFA must require second factor: %+v", confirmedProfile)
 	}
 }

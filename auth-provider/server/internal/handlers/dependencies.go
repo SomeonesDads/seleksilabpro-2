@@ -26,6 +26,8 @@ type MFAStore interface {
 
 type TOTPStore interface {
 	FindByUserID(context.Context, uuid.UUID) (*models.UserTOTP, error)
+	EnrollPending(context.Context, uuid.UUID, []byte) error
+	Confirm(context.Context, uuid.UUID) error
 }
 
 type ApplicationStore interface {
@@ -36,6 +38,7 @@ type ApplicationStore interface {
 
 type PolicyStore interface {
 	UserHasApplicationAccess(context.Context, uuid.UUID, uuid.UUID) (bool, error)
+	GroupsAllowedForApplication(context.Context, uuid.UUID, uuid.UUID) ([]string, error)
 }
 
 type SessionStore interface {
@@ -101,6 +104,7 @@ type AdminApplicationStore interface {
 type AdminPolicyStore interface {
 	Set(context.Context, *models.ApplicationGroupPolicy) error
 	ListByApplication(context.Context, uuid.UUID) ([]models.ApplicationGroupPolicy, error)
+	Delete(context.Context, uuid.UUID, uuid.UUID) error
 }
 
 type AdminSessionStore interface {
@@ -138,12 +142,13 @@ type AdminRepositories struct {
 }
 
 type AuthHandlerConfig struct {
-	AuthCodeTTL    time.Duration
-	AccessTokenTTL time.Duration
-	SessionTTL     time.Duration
-	JWTIssuer      string
-	JWTSigningKey  []byte
-	TokenStrategy  string
+	AuthCodeTTL      time.Duration
+	AccessTokenTTL   time.Duration
+	SessionTTL       time.Duration
+	JWTIssuer        string
+	JWTSigningKey    []byte
+	TokenStrategy    string
+	MFAEncryptionKey []byte
 }
 
 const (
@@ -205,6 +210,7 @@ func NewAuthHandlerWithDependencies(repos AuthRepositories, cfg AuthHandlerConfi
 		JWTIssuer:          cfg.JWTIssuer,
 		JWTSigningKey:      cfg.JWTSigningKey,
 		TokenStrategy:      cfg.TokenStrategy,
+		MFAEncryptionKey:   append([]byte(nil), cfg.MFAEncryptionKey...),
 	}
 }
 

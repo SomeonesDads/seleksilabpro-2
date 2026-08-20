@@ -230,6 +230,32 @@ func renderLoginPage(w http.ResponseWriter, intent string) {
 	fmt.Fprintf(w, `<!doctype html><html><body><h1>Sign in</h1><form method="post" action="/login"><input type="hidden" name="return_to" value="%s"><label>Email <input name="email" type="email" required></label><label>Password <input name="password" type="password" required></label><button type="submit">Sign in</button></form></body></html>`, html.EscapeString(intent))
 }
 
+// renderMFASettingsPage shows the freshly issued TOTP secret and a form to
+// confirm enrollment. The otpauth URI is shown as a link; the raw base32
+// secret is provided for authenticator apps that cannot scan a QR.
+func renderMFASettingsPage(w http.ResponseWriter, otpauthURI, secret string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!doctype html><html><body><h1>Set up multi-factor authentication</h1>
+<p>Scan this URI with your authenticator app, or enter the secret manually:</p>
+<p><a href="%s">%s</a></p>
+<p><code>%s</code></p>
+<form method="post" action="/mfa/enroll/confirm">
+  <label>Enter the 6-digit code <input name="code" inputmode="numeric" pattern="[0-9]{6}" required></label>
+  <button type="submit">Activate MFA</button>
+</form>
+</body></html>`, html.EscapeString(otpauthURI), html.EscapeString(otpauthURI), html.EscapeString(secret))
+}
+
+// renderMFAConfirmResult shows the outcome of an enrollment confirmation.
+func renderMFAConfirmResult(w http.ResponseWriter, success bool, message string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	status := "MFA activated"
+	if !success {
+		status = "Activation failed"
+	}
+	fmt.Fprintf(w, `<!doctype html><html><body><h1>%s</h1><p>%s</p><p><a href="/mfa/enroll">Back to MFA setup</a></p></body></html>`, html.EscapeString(status), html.EscapeString(message))
+}
+
 func decodeJSONBody(r *http.Request, dst any) error {
 	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 	if err := decoder.Decode(dst); err != nil {

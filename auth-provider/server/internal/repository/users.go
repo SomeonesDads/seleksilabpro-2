@@ -118,6 +118,42 @@ func (r *TOTPRepository) Upsert(ctx context.Context, credential *models.UserTOTP
 	}).Error
 }
 
+// EnrollPending stores an unconfirmed TOTP credential. The encrypted secret is
+// written but confirmed stays false until Confirm succeeds, so a pending
+// enrollment never blocks login.
+func (r *TOTPRepository) EnrollPending(ctx context.Context, userID uuid.UUID, encryptedSecret []byte) error {
+	var existing models.UserTOTP
+	err := r.db.WithContext(ctx).Where("user_id = ?", userID).First(&existing).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return r.db.WithContext(ctx).Create(&models.UserTOTP{
+			UserID:          userID,
+			EncryptedSecret: encryptedSecret,
+			Confirmed:       false,
+		}).Error
+	}
+	if err != nil {
+		return err
+	}
+	return r.db.WithContext(ctx).Model(&existing).Updates(map[string]any{
+		"encrypted_secret": encryptedSecret,
+		"confirmed":        false,
+	}).Error
+}
+
+// Confirm marks the user's pending TOTP credential as active.
+func (r *TOTPRepository) Confirm(ctx context.Context, userID uuid.UUID) error {
+	res := r.db.WithContext(ctx).Model(&models.UserTOTP{}).
+		Where("user_id = ?", userID).
+		Updates(map[string]any{"confirmed": true})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrTOTPNotFound
+	}
+	return nil
+}
+
 func NewUserRepository(db *gorm.DB) *UserRepository {
 	return &UserRepository{db: db}
 }

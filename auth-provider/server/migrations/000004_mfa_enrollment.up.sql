@@ -1,0 +1,2 @@
+ALTER TABLE user_totp_credentials
+    ADD COLUMN IF NOT EXISTS confirmed BOOLEAN NOT NULL DEFAULT FALSE;

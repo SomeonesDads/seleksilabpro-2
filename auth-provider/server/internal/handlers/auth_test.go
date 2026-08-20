@@ -358,6 +358,7 @@ func TestUserInfoAcceptanceRejectsMalformedTokensAndReturnsSafeProfile(t *testin
 		Sessions:     &flowSessions{created: session},
 		AccessTokens: &flowTokens{token: &models.AccessToken{JTI: jti, UserID: user.ID, ApplicationID: application.ID, SessionID: session.ID, ExpiresAt: time.Now().Add(time.Minute)}},
 		Groups:       flowGroups{},
+		Policies:     flowPolicy{allowed: true},
 	}, AuthHandlerConfig{JWTSigningKey: key}, nil)
 
 	expired := acceptanceUserInfoToken(t, key, "auth-provider", application.ID.String(), session.ID.String(), time.Now().Add(-time.Second), "HS256")

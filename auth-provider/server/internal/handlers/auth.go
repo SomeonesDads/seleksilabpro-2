@@ -7,14 +7,18 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
+	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/mfa"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/models"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/repository"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/tokens"
 	sharederrors "github.com/SomeonesDads/seleksilabpro-2/shared/errors"
 	"github.com/SomeonesDads/seleksilabpro-2/shared/idgen"
 	"github.com/google/uuid"
+	"github.com/pquerna/otp"
+	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -48,6 +52,7 @@ type AuthHandler struct {
 	JWTIssuer          string
 	JWTSigningKey      []byte
 	TokenStrategy      string
+	MFAEncryptionKey   []byte
 }
 
 // GET /login
@@ -82,7 +87,6 @@ func (h *AuthHandler) LoginPage(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	input, err := decodeLoginInput(r)
 	if err != nil {
-		h.audit(r, "LoginFailed", "failed", nil, nil, nil, nil)
 		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid credentials")
 		return
 	}
@@ -128,33 +132,28 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	if h.TOTP != nil {
 		credential, totpErr := h.TOTP.FindByUserID(r.Context(), user.ID)
-		if totpErr == nil && credential != nil {
-			// Continue below with a short-lived MFA challenge.
-		} else if totpErr == nil || errors.Is(totpErr, repository.ErrTOTPNotFound) {
-			if err := h.completePasswordLogin(w, r, user.ID, intent); err != nil {
-				h.log().Error("session creation failed", slog.Any("err", err))
-				userID := user.ID
-				h.audit(r, "LoginFailed", "failed", &userID, nil, nil, nil)
-				writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "authentication unavailable")
-			}
-			return
-		} else {
+		if totpErr != nil && !errors.Is(totpErr, repository.ErrTOTPNotFound) {
 			h.log().Error("TOTP lookup failed", slog.Any("err", totpErr))
 			userID := user.ID
 			h.audit(r, "LoginFailed", "failed", &userID, nil, nil, nil)
 			writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "authentication unavailable")
 			return
 		}
-	}
-	if h.TOTP == nil {
-		if err := h.completePasswordLogin(w, r, user.ID, intent); err != nil {
-			h.log().Error("session creation failed", slog.Any("err", err))
-			userID := user.ID
-			h.audit(r, "LoginFailed", "failed", &userID, nil, nil, nil)
-			writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "authentication unavailable")
+		if totpErr == nil && credential != nil && credential.Confirmed {
+			// User has an active MFA credential: issue a pending MFA challenge
+			// instead of a central session (handled below).
+			goto issueMFAChallenge
 		}
-		return
 	}
+	if err := h.completePasswordLogin(w, r, user.ID, intent); err != nil {
+		h.log().Error("session creation failed", slog.Any("err", err))
+		userID := user.ID
+		h.audit(r, "LoginFailed", "failed", &userID, nil, nil, nil)
+		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "authentication unavailable")
+	}
+	return
+
+issueMFAChallenge:
 
 	// 3. Issue pending MFA token
 	rawToken, err := idgen.RandomToken(32)
@@ -276,6 +275,156 @@ func (h *AuthHandler) LoginMFA(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"authenticated": true, "mfa_verified": true})
+}
+
+// currentUserID resolves the authenticated user from the central session
+// cookie. Used by self-service MFA enrollment endpoints.
+func (h *AuthHandler) currentUserID(r *http.Request) (uuid.UUID, bool) {
+	cookie, err := r.Cookie(ssoSessionCookie)
+	if err != nil || cookie.Value == "" || h.sessionLookup() == nil {
+		return uuid.Nil, false
+	}
+	session, err := h.sessionLookup().FindActiveByTokenHash(r.Context(), idgen.HashToken(cookie.Value))
+	if err != nil || session == nil {
+		return uuid.Nil, false
+	}
+	return session.UserID, true
+}
+
+// issueMFAEnrollment generates a TOTP secret, stores it encrypted in a pending
+// (unconfirmed) state, and returns the otpauth URI + raw base32 secret. Shared
+// by the JSON API and the server-rendered settings page.
+func (h *AuthHandler) issueMFAEnrollment(r *http.Request, userID uuid.UUID) (otpauthURI, secret string, err error) {
+	if h.TOTP == nil || h.VerifyMFA == nil || len(h.MFAEncryptionKey) == 0 {
+		return "", "", errors.New("mfa unavailable")
+	}
+	account := userID.String()
+	if h.UserProfiles != nil {
+		if user, profErr := h.UserProfiles.FindByID(r.Context(), userID); profErr == nil && user != nil && user.Email != "" {
+			account = user.Email
+		}
+	}
+	key, genErr := totp.Generate(totp.GenerateOpts{
+		Issuer:      "Auth Provider",
+		AccountName: account,
+		Period:      30,
+		Digits:      otp.DigitsSix,
+		Algorithm:   otp.AlgorithmSHA1,
+	})
+	if genErr != nil {
+		return "", "", genErr
+	}
+	encrypted, encErr := mfa.EncryptSecret(h.MFAEncryptionKey, key.Secret())
+	if encErr != nil {
+		return "", "", encErr
+	}
+	if enrollErr := h.TOTP.EnrollPending(r.Context(), userID, encrypted); enrollErr != nil {
+		return "", "", enrollErr
+	}
+	return key.URL(), key.Secret(), nil
+}
+
+// EnrollMFA begins MFA enrollment for the signed-in user. It generates a TOTP
+// secret, stores it encrypted in an UNCONFIRMED (pending) state, and returns
+// the otpauth URI. The credential does not protect the account until
+// ConfirmMFAEnrollment succeeds (see DECISIONS/spec B01).
+func (h *AuthHandler) EnrollMFA(w http.ResponseWriter, r *http.Request) {
+	userID, ok := h.currentUserID(r)
+	if !ok {
+		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "authentication required")
+		return
+	}
+	otpauthURI, secret, err := h.issueMFAEnrollment(r, userID)
+	if err != nil {
+		h.log().Error("totp enrollment failed", slog.Any("err", err))
+		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "mfa unavailable")
+		return
+	}
+	h.audit(r, "MFAEnrolled", "success", &userID, nil, nil, nil)
+	_ = writeJSON(w, http.StatusOK, map[string]any{
+		"otpauth_uri": otpauthURI,
+		"secret":      secret,
+		"confirmed":   false,
+	})
+}
+
+// MFASettingsPage renders a self-service MFA enrollment page: it (re)starts a
+// pending enrollment and shows the otpauth secret plus a confirmation form.
+func (h *AuthHandler) MFASettingsPage(w http.ResponseWriter, r *http.Request) {
+	userID, ok := h.currentUserID(r)
+	if !ok {
+		http.Redirect(w, r, loginRedirectTarget("/mfa/enroll"), http.StatusFound)
+		return
+	}
+	otpauthURI, secret, err := h.issueMFAEnrollment(r, userID)
+	if err != nil {
+		h.log().Error("mfa settings page failed", slog.Any("err", err))
+		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "mfa unavailable")
+		return
+	}
+	h.audit(r, "MFAEnrolled", "success", &userID, nil, nil, nil)
+	renderMFASettingsPage(w, otpauthURI, secret)
+}
+
+// ConfirmMFAEnrollment activates a pending TOTP credential by verifying the
+// first code. Until this succeeds, login does not require a second factor.
+func (h *AuthHandler) ConfirmMFAEnrollment(w http.ResponseWriter, r *http.Request) {
+	userID, ok := h.currentUserID(r)
+	if !ok {
+		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "authentication required")
+		return
+	}
+	if h.TOTP == nil || h.VerifyMFA == nil {
+		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "mfa unavailable")
+		return
+	}
+	ct := r.Header.Get("Content-Type")
+	wantsHTML := strings.HasPrefix(ct, "application/x-www-form-urlencoded") || strings.HasPrefix(ct, "multipart/form-data")
+	var input struct {
+		Code string `json:"code"`
+	}
+	if wantsHTML {
+		if err := r.ParseForm(); err != nil {
+			h.audit(r, "MFAFailed", "failed", &userID, nil, nil, nil)
+			renderMFAConfirmResult(w, false, "MFA code is required.")
+			return
+		}
+		input.Code = r.FormValue("code")
+	} else {
+		if err := decodeJSONBody(r, &input); err != nil || input.Code == "" {
+			h.audit(r, "MFAFailed", "failed", &userID, nil, nil, nil)
+			writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidRequest, "mfa code required")
+			return
+		}
+	}
+	if _, totpErr := h.TOTP.FindByUserID(r.Context(), userID); totpErr != nil {
+		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidRequest, "enrollment not initiated")
+		return
+	}
+	if !h.VerifyMFA(r.Context(), userID, input.Code) {
+		h.audit(r, "MFAFailed", "failed", &userID, nil, nil, nil)
+		if wantsHTML {
+			renderMFAConfirmResult(w, false, "Invalid MFA code. Try again.")
+			return
+		}
+		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid mfa code")
+		return
+	}
+	if err := h.TOTP.Confirm(r.Context(), userID); err != nil {
+		h.audit(r, "MFAFailed", "failed", &userID, nil, nil, nil)
+		if wantsHTML {
+			renderMFAConfirmResult(w, false, "Invalid MFA code. Try again.")
+			return
+		}
+		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid mfa code")
+		return
+	}
+	h.audit(r, "MFASucceeded", "success", &userID, nil, nil, nil)
+	if wantsHTML {
+		renderMFAConfirmResult(w, true, "")
+		return
+	}
+	_ = writeJSON(w, http.StatusOK, map[string]any{"enrolled": true, "confirmed": true})
 }
 
 func (h *AuthHandler) completePasswordLogin(w http.ResponseWriter, r *http.Request, userID uuid.UUID, intent string) error {
@@ -676,7 +825,7 @@ func (h *AuthHandler) UserInfo(w http.ResponseWriter, r *http.Request) {
 	jti, jtiErr := uuid.Parse(claims.ID)
 	sessionID, sessionErr := uuid.Parse(claims.SID)
 	userID, userErr := uuid.Parse(claims.Subject)
-	if claims.Scope != tokens.DefaultScope || jtiErr != nil || sessionErr != nil || userErr != nil || h.AccessTokens == nil || h.sessionLookup() == nil || h.userProfiles() == nil || h.Groups == nil {
+	if claims.Scope != tokens.DefaultScope || jtiErr != nil || sessionErr != nil || userErr != nil || h.AccessTokens == nil || h.sessionLookup() == nil || h.userProfiles() == nil || h.Policies == nil {
 		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid access token")
 		return
 	}
@@ -722,17 +871,13 @@ func (h *AuthHandler) UserInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid access token")
 		return
 	}
-	groups, err := h.Groups.FindByUserID(r.Context(), userID)
+	groups, err := h.Policies.GroupsAllowedForApplication(r.Context(), userID, app.ID)
 	if err != nil {
 		h.log().Error("userinfo group lookup failed", slog.Any("err", err))
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "user information unavailable")
 		return
 	}
-	groupNames := make([]string, 0, len(groups))
-	for _, group := range groups {
-		groupNames = append(groupNames, group.Name)
-	}
-	_ = writeJSON(w, http.StatusOK, map[string]any{"sub": user.ID.String(), "email": user.Email, "name": user.Name, "groups": groupNames})
+	_ = writeJSON(w, http.StatusOK, map[string]any{"sub": user.ID.String(), "email": user.Email, "name": user.Name, "groups": groups})
 }
 
 // POST /logout   (SSO / global logout, triggered from the Auth Portal UI)

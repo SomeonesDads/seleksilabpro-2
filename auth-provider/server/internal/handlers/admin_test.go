@@ -95,6 +95,7 @@ func (adminPoliciesFake) Set(context.Context, *models.ApplicationGroupPolicy) er
 func (adminPoliciesFake) ListByApplication(context.Context, uuid.UUID) ([]models.ApplicationGroupPolicy, error) {
 	return nil, nil
 }
+func (adminPoliciesFake) Delete(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
 type adminSessionsFake struct {
 	called bool

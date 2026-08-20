@@ -79,6 +79,13 @@ func (p flowPolicy) UserHasApplicationAccess(context.Context, uuid.UUID, uuid.UU
 	return p.allowed, nil
 }
 
+func (p flowPolicy) GroupsAllowedForApplication(_ context.Context, _ uuid.UUID, _ uuid.UUID) ([]string, error) {
+	if !p.allowed {
+		return []string{}, nil
+	}
+	return []string{"app-users"}, nil
+}
+
 type flowSessions struct {
 	byHash           map[string]*models.SSOSession
 	created          *models.SSOSession
@@ -212,8 +219,10 @@ func (s *flowAudit) WriteAuditLog(_ context.Context, entry *models.AuditLog) err
 type flowTOTP struct{}
 
 func (flowTOTP) FindByUserID(context.Context, uuid.UUID) (*models.UserTOTP, error) {
-	return &models.UserTOTP{}, nil
+	return &models.UserTOTP{Confirmed: true}, nil
 }
+func (flowTOTP) EnrollPending(context.Context, uuid.UUID, []byte) error { return nil }
+func (flowTOTP) Confirm(context.Context, uuid.UUID) error              { return nil }
 
 type flowMFA struct {
 	challenge      *models.MFALoginChallenge
@@ -261,6 +270,8 @@ type emptyFlowTOTP struct{}
 func (emptyFlowTOTP) FindByUserID(context.Context, uuid.UUID) (*models.UserTOTP, error) {
 	return nil, nil
 }
+func (emptyFlowTOTP) EnrollPending(context.Context, uuid.UUID, []byte) error { return nil }
+func (emptyFlowTOTP) Confirm(context.Context, uuid.UUID) error              { return nil }
 
 func TestLoginIntentIsRevalidatedAgainstAuthorizationRequest(t *testing.T) {
 	application := models.Application{ID: uuid.New(), ClientID: "app-client", Status: "active"}
@@ -892,5 +903,44 @@ func TestMFARequiresSecondFactorAndAllowsFinalAttempt(t *testing.T) {
 	handler.LoginMFA(replayResponse, replayRequest)
 	if replayResponse.Code != http.StatusUnauthorized {
 		t.Fatalf("MFA challenge replay was accepted: status=%d", replayResponse.Code)
+	}
+}
+
+func TestMFASettingsPageRendersEnrollmentForm(t *testing.T) {
+	session := &models.SSOSession{ID: uuid.New(), UserID: uuid.New(), Status: "active", ExpiresAt: time.Now().Add(time.Hour)}
+	sessions := &flowSessions{
+		byHash:  map[string]*models.SSOSession{idgen.HashToken("mfa-page-session"): session},
+		created: session,
+	}
+	handler := NewAuthHandlerWithDependencies(AuthRepositories{
+		TOTP:             &flowTOTP{},
+		Sessions:         sessions,
+		SessionLookup:    sessions,
+		SessionRevocation: sessions,
+	}, AuthHandlerConfig{MFAEncryptionKey: []byte("0123456789abcdef0123456789abcdef")}, nil)
+	handler.VerifyMFA = func(context.Context, uuid.UUID, string) bool { return true }
+
+	pageRequest := httptest.NewRequest(http.MethodGet, "/mfa/enroll", nil)
+	pageRequest.AddCookie(&http.Cookie{Name: ssoSessionCookie, Value: "mfa-page-session"})
+	pageResponse := httptest.NewRecorder()
+	handler.MFASettingsPage(pageResponse, pageRequest)
+	if pageResponse.Code != http.StatusOK {
+		t.Fatalf("MFA settings page failed: status=%d body=%s", pageResponse.Code, pageResponse.Body.String())
+	}
+	body := pageResponse.Body.String()
+	if !strings.Contains(body, "otpauth") || !strings.Contains(body, "/mfa/enroll/confirm") {
+		t.Fatalf("MFA settings page missing enrollment form: %s", body)
+	}
+
+	confirmRequest := httptest.NewRequest(http.MethodPost, "/mfa/enroll/confirm", strings.NewReader("code=123456"))
+	confirmRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	confirmRequest.AddCookie(&http.Cookie{Name: ssoSessionCookie, Value: "mfa-page-session"})
+	confirmResponse := httptest.NewRecorder()
+	handler.ConfirmMFAEnrollment(confirmResponse, confirmRequest)
+	if confirmResponse.Code != http.StatusOK {
+		t.Fatalf("MFA confirm via form failed: status=%d body=%s", confirmResponse.Code, confirmResponse.Body.String())
+	}
+	if !strings.Contains(confirmResponse.Body.String(), "MFA activated") {
+		t.Fatalf("MFA confirm did not render success page: %s", confirmResponse.Body.String())
 	}
 }

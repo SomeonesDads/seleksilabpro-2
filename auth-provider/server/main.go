@@ -89,6 +89,7 @@ func main() {
 		JWTIssuer:      cfg.JWTIssuer,
 		JWTSigningKey:  []byte(cfg.JWTSigningKey),
 		TokenStrategy:  cfg.TokenStrategy,
+		MFAEncryptionKey: cfg.MFAEncryptionKey,
 	}, logger)
 	authH.VerifyMFA = mfa.NewTOTPVerifier(totpRepo, cfg.MFAEncryptionKey).Verify
 	adminH := handlers.NewAdminHandler(handlers.AdminRepositories{
@@ -107,6 +108,9 @@ func main() {
 	mux.HandleFunc("GET /login", authH.LoginPage)
 	mux.HandleFunc("POST /login", authH.Login)
 	mux.HandleFunc("POST /login/mfa", authH.LoginMFA)
+	mux.HandleFunc("POST /mfa/enroll", authH.EnrollMFA)
+	mux.HandleFunc("GET /mfa/enroll", authH.MFASettingsPage)
+	mux.HandleFunc("POST /mfa/enroll/confirm", authH.ConfirmMFAEnrollment)
 	mux.HandleFunc("GET /authorize", authH.Authorize)
 	mux.HandleFunc("POST /token", authH.Token)
 	mux.HandleFunc("GET /userinfo", authH.UserInfo)
@@ -127,6 +131,7 @@ func main() {
 	adminMux.HandleFunc("POST /admin/applications", adminH.CreateApplication)
 	adminMux.HandleFunc("POST /admin/applications/{id}/redirect-uris", adminH.AddRedirectURI)
 	adminMux.HandleFunc("POST /admin/applications/{id}/policies", adminH.SetApplicationGroupPolicy)
+	adminMux.HandleFunc("DELETE /admin/applications/{id}/policies", adminH.DeleteApplicationGroupPolicy)
 	adminMux.HandleFunc("GET /admin/overview/{userId}", adminH.GetUserStatusOverview)
 	mux.Handle("/admin/", middleware.RequireAdminWithAuthenticator(sessionRepo, adminMux))
 

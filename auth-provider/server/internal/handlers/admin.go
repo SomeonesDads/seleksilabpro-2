@@ -397,6 +397,37 @@ func (h *AdminHandler) SetApplicationGroupPolicy(w http.ResponseWriter, r *http.
 	_ = writeJSON(w, http.StatusOK, policy)
 }
 
+// DeleteApplicationGroupPolicy removes an allow policy binding a group to an
+// application. Per DECISIONS.md Decision 016, this revokes only the affected
+// application's access-token metadata (not central SSO sessions or unrelated
+// apps) and emits an AccessPolicyChanged outbox event per affected user.
+func (h *AdminHandler) DeleteApplicationGroupPolicy(w http.ResponseWriter, r *http.Request) {
+	if h.Repos.Policies == nil {
+		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "policies unavailable")
+		return
+	}
+	applicationID, ok := adminID(r, "id")
+	if !ok {
+		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidRequest, "invalid application id")
+		return
+	}
+	groupID, err := uuid.Parse(r.URL.Query().Get("group_id"))
+	if err != nil || groupID == uuid.Nil {
+		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidRequest, "group_id is required")
+		return
+	}
+	if err := h.Repos.Policies.Delete(r.Context(), applicationID, groupID); err != nil {
+		if errors.Is(err, repository.ErrPolicyNotFound) {
+			writeError(w, r, http.StatusNotFound, sharederrors.CodeNotFound, "policy not found")
+			return
+		}
+		adminRepositoryError(w, r, err, "policy")
+		return
+	}
+	h.audit(r, "PolicyChanged", "success", nil, &applicationID)
+	_ = writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "application_id": applicationID, "group_id": groupID})
+}
+
 func (h *AdminHandler) GetUserStatusOverview(w http.ResponseWriter, r *http.Request) {
 	if h.Repos.Users == nil || h.Repos.Groups == nil || h.Repos.Applications == nil || h.Repos.Policies == nil {
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "overview unavailable")

@@ -15,3 +15,8 @@ go.work.sum
 # ide
 .vscode/
 .idea/
+
+AGENTS.md
+DECISIONS.md
+SPECS.md
+todo.md
