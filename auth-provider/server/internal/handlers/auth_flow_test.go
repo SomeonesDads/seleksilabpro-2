@@ -222,7 +222,7 @@ func (flowTOTP) FindByUserID(context.Context, uuid.UUID) (*models.UserTOTP, erro
 	return &models.UserTOTP{Confirmed: true}, nil
 }
 func (flowTOTP) EnrollPending(context.Context, uuid.UUID, []byte) error { return nil }
-func (flowTOTP) Confirm(context.Context, uuid.UUID) error              { return nil }
+func (flowTOTP) Confirm(context.Context, uuid.UUID) error               { return nil }
 
 type flowMFA struct {
 	challenge      *models.MFALoginChallenge
@@ -271,7 +271,7 @@ func (emptyFlowTOTP) FindByUserID(context.Context, uuid.UUID) (*models.UserTOTP,
 	return nil, nil
 }
 func (emptyFlowTOTP) EnrollPending(context.Context, uuid.UUID, []byte) error { return nil }
-func (emptyFlowTOTP) Confirm(context.Context, uuid.UUID) error              { return nil }
+func (emptyFlowTOTP) Confirm(context.Context, uuid.UUID) error               { return nil }
 
 func TestLoginIntentIsRevalidatedAgainstAuthorizationRequest(t *testing.T) {
 	application := models.Application{ID: uuid.New(), ClientID: "app-client", Status: "active"}
@@ -913,9 +913,9 @@ func TestMFASettingsPageRendersEnrollmentForm(t *testing.T) {
 		created: session,
 	}
 	handler := NewAuthHandlerWithDependencies(AuthRepositories{
-		TOTP:             &flowTOTP{},
-		Sessions:         sessions,
-		SessionLookup:    sessions,
+		TOTP:              &flowTOTP{},
+		Sessions:          sessions,
+		SessionLookup:     sessions,
 		SessionRevocation: sessions,
 	}, AuthHandlerConfig{MFAEncryptionKey: []byte("0123456789abcdef0123456789abcdef")}, nil)
 	handler.VerifyMFA = func(context.Context, uuid.UUID, string) bool { return true }
