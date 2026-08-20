@@ -96,10 +96,11 @@ func (r *PolicyRepository) Delete(ctx context.Context, applicationID, groupID uu
 		}
 
 		now := time.Now()
+		const reason = "access_policy_changed"
 		for _, uid := range userIDs {
 			if err := tx.Model(&models.AccessToken{}).
 				Where("user_id = ? AND application_id = ? AND revoked_at IS NULL", uid, applicationID).
-				Updates(map[string]any{"revoked_at": now}).Error; err != nil {
+				Updates(map[string]any{"revoked_at": now, "revoke_reason": reason}).Error; err != nil {
 				return err
 			}
 			if err := createAccessPolicyChangedEvent(tx, uid, applicationID, "access_policy_changed"); err != nil {
