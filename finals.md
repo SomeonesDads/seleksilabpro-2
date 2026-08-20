@@ -149,12 +149,14 @@ independent from App A's sessions.
 
 ### Current gap
 
-The server owns the outbox records, but the server process does not connect to
-RabbitMQ or publish events. The worker contains the outbox publisher and
-consumer, but the complete running flow cannot be demonstrated without App A
-and App B. The `cmd/seed` command is also still a placeholder, so there is no
-repeatable way to provision demo users, groups, applications, redirect URIs,
-policies, and worker target credentials.
+The server owns the outbox records and the transactional-outbox writes are
+complete, but the server process does not connect to RabbitMQ (outbox
+publishing lives in the Sync Worker per DECISIONS.md 017/020). The worker
+contains the outbox publisher and consumer, but the complete running flow
+cannot be fully demonstrated without App A and App B wired into Compose (see
+item 9). The `cmd/seed` command is implemented and idempotent: it provisions
+demo users, groups, applications, redirect URIs, policies, and memberships,
+and prints the worker `APP_TARGETS_JSON` plus application credentials.
 
 ### Required behavior
 

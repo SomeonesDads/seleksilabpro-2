@@ -1,11 +1,11 @@
-# Build context is the repo root (see docker-compose.yml `context: .`)
-# so this Dockerfile can resolve the go.work module graph, including the
-# local `shared` module via its replace directive.
+# Build context is the repo root (see docker-compose.yml `context: .`).
+# The server module resolves the local `shared` module through a relative
+# `replace` directive, so copying `shared/` alongside the service is enough;
+# no go.work file is required.
 
-FROM golang:1.22-alpine AS build
+FROM golang:1.25-alpine AS build
 WORKDIR /src
 
-COPY go.work go.work
 COPY shared/ shared/
 COPY auth-provider/server/ auth-provider/server/
 

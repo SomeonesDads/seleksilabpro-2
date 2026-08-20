@@ -1,7 +1,6 @@
 FROM golang:1.22-alpine AS build
 WORKDIR /src
 
-COPY go.work go.work
 COPY shared/ shared/
 COPY auth-provider/control-panel/ auth-provider/control-panel/
 
