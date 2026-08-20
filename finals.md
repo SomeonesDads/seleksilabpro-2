@@ -58,9 +58,19 @@ second authorization model that bypasses the server middleware.
 
 ### Current gap
 
-The `applications/app-a` source tree, Dockerfile, configuration, local schema,
-and HTTP handlers are absent. Compose references the directory, but there is
-no implementation to build or run.
+`applications/app-a` is now implemented as an independent Go module (GORM +
+PostgreSQL, no user credentials). It performs the full OAuth authorization-code
++ S256 PKCE flow against the Auth Provider, creates independent local sessions
+(storing only a hashed session token, Auth Provider user reference, and central
+session id), caches the `/userinfo` profile, records an activity log and
+processed revocation events, and exposes a dashboard, login, logout, and
+authenticated `POST /internal/logout` endpoint. The local schema, Dockerfile,
+`.env.example`, and handler/store integration tests are present and pass.
+
+The remaining gap is cross-service verification: a running Auth Provider +
+Sync Worker is required to demonstrate end-to-end SSO logout and policy-loss
+revocation delivery, and `cmd/seed` must provision App A's client id/secret and
+redirect URI before the demo flow can run.
 
 ### Required behavior
 
@@ -104,9 +114,17 @@ codes.
 
 ### Current gap
 
-The `applications/app-b` source tree, Dockerfile, configuration, local schema,
-and HTTP handlers are absent. Compose references the directory, but there is
-no implementation to build or run.
+`applications/app-b` is now implemented as an independent Go module mirroring
+App A's relying-application contract, with its own client id/secret, redirect
+URI, local database, local session store, profile cache, event inbox, and
+internal logout endpoint. Local sessions are independent from App A (distinct
+cookie name and database). Its handlers, store, Dockerfile, `.env.example`,
+and tests are present and pass.
+
+The remaining gap is the same as App A: cross-service verification against a
+running Auth Provider + Sync Worker, and `cmd/seed` provisioning of App B's
+client credentials and redirect URI, so the independent login and
+revocation-delivery behavior can be demonstrated end to end.
 
 ### Required behavior
 
