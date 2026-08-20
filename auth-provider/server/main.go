@@ -106,6 +106,7 @@ func main() {
 		Audit:        auditRepo,
 	}, logger)
 	healthH := handlers.NewHealthHandler(pool)
+	healthH.BrokerURL = cfg.BrokerURL
 
 	metricsInstance := metrics.New(nil)
 	authH.Metrics = metricsInstance
