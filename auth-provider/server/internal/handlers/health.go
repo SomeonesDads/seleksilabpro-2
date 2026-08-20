@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/metrics"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type HealthHandler struct {
-	DB *pgxpool.Pool
+	DB      *pgxpool.Pool
+	Metrics *metrics.Metrics
 	// TODO [B03]: add a broker connection/checker here too.
 }
 
@@ -23,6 +25,9 @@ func NewHealthHandler(db *pgxpool.Pool) *HealthHandler {
 // GET /health — simple combined check for the base (non-bonus) requirement.
 func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 	if err := h.DB.Ping(r.Context()); err != nil {
+		if h.Metrics != nil {
+			h.Metrics.SetDBHealth(false)
+		}
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status": "unhealthy",
@@ -32,6 +37,9 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{"status": "healthy"})
+	if h.Metrics != nil {
+		h.Metrics.SetDBHealth(true)
+	}
 }
 
 // GET /health/live — [B03] proves the process is up; must NOT depend on
@@ -50,8 +58,14 @@ func (h *HealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
 	if err := h.DB.Ping(r.Context()); err != nil {
 		components["database"] = "down"
 		ready = false
+		if h.Metrics != nil {
+			h.Metrics.SetDBHealth(false)
+		}
 	} else {
 		components["database"] = "up"
+		if h.Metrics != nil {
+			h.Metrics.SetDBHealth(true)
+		}
 	}
 
 	// TODO: components["broker"] = ... via an amqp connection check.

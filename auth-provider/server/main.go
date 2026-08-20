@@ -8,14 +8,19 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/config"
 	appdb "github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/db"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/handlers"
+	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/metrics"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/mfa"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/middleware"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/repository"
 	"github.com/SomeonesDads/seleksilabpro-2/shared/logging"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"gorm.io/gorm"
 )
 
 func main() {
@@ -102,6 +107,16 @@ func main() {
 	}, logger)
 	healthH := handlers.NewHealthHandler(pool)
 
+	metricsInstance := metrics.New(nil)
+	authH.Metrics = metricsInstance
+	healthH.Metrics = metricsInstance
+
+	// Refresh dependency-health and outbox-depth gauges once at startup and
+	// then periodically so the metrics endpoint reflects real runtime state
+	// immediately rather than only after the first tick.
+	updateRuntimeMetrics(ctx, logger, gormDB, pool, metricsInstance)
+	go refreshRuntimeMetrics(ctx, logger, gormDB, pool, metricsInstance)
+
 	mux := http.NewServeMux()
 
 	// --- Synchronous OAuth2 / central session flow ---
@@ -140,10 +155,11 @@ func main() {
 	mux.HandleFunc("GET /health/live", healthH.Live)
 	mux.HandleFunc("GET /health/ready", healthH.Ready)
 
-	// TODO [B02]: mount promhttp.Handler() at GET /metrics once you wire up
-	// prometheus/client_golang counters/histograms in the handlers above.
+	// --- Metrics (B02) ---
+	mux.Handle("GET /metrics", promhttp.Handler())
 
 	var handler http.Handler = mux
+	handler = metricsInstance.Middleware(handler)
 	handler = middleware.RequestLogger(logger)(handler)
 	handler = logging.WithRequestID(handler)
 
@@ -171,4 +187,36 @@ func main() {
 	// TODO [B04]: also stop consuming from the broker here and close the
 	// AMQP connection cleanly before the process exits.
 	logger.Info("shutdown complete")
+}
+
+// refreshRuntimeMetrics periodically updates the database-health and
+// outbox-depth gauges so /metrics reflects live state without coupling the
+// metrics package to the database.
+func refreshRuntimeMetrics(ctx context.Context, logger *slog.Logger, db *gorm.DB, pool *pgxpool.Pool, m *metrics.Metrics) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			updateRuntimeMetrics(ctx, logger, db, pool, m)
+		}
+	}
+}
+
+// updateRuntimeMetrics performs one refresh of the dependency-health and
+// outbox-depth gauges. Exposed so startup can populate them immediately.
+func updateRuntimeMetrics(ctx context.Context, logger *slog.Logger, db *gorm.DB, pool *pgxpool.Pool, m *metrics.Metrics) {
+	up := pool.Ping(ctx) == nil
+	m.SetDBHealth(up)
+	if !up {
+		return
+	}
+	var depth int64
+	if err := db.WithContext(ctx).Table("events").Where("published_at IS NULL").Count(&depth).Error; err != nil {
+		logger.Debug("outbox depth refresh failed", slog.Any("err", err))
+		return
+	}
+	m.SetOutboxDepth(depth)
 }

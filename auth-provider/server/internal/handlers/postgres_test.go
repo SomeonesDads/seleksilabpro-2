@@ -20,6 +20,7 @@ import (
 	"time"
 
 	appdb "github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/db"
+	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/metrics"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/mfa"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/models"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/repository"
@@ -27,6 +28,8 @@ import (
 	"github.com/SomeonesDads/seleksilabpro-2/shared/idgen"
 	"github.com/google/uuid"
 	"github.com/pquerna/otp/totp"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"strconv"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
@@ -978,4 +981,133 @@ func TestPostgresEnrollAttemptReservationBoundedUnderConcurrency(t *testing.T) {
 	if totp.EnrollAttempts != maxAttempts {
 		t.Fatalf("locked credential attempt count changed: %d", totp.EnrollAttempts)
 	}
+}
+
+// TestPostgresMetricsEndpoint exercises the real server /metrics surface end to
+// end against a disposable database: it confirms request/error counters move
+// after login attempts and that the outbox-depth gauge reflects an unpublished
+// event. The handler shares the default metrics registry with promhttp.
+func TestPostgresMetricsEndpoint(t *testing.T) {
+	db := openAcceptancePostgres(t)
+	fixture := seedPostgresFlowFixture(t, db, false)
+	handler := postgresAuthHandler(db)
+	m := metrics.New(nil)
+
+	router := http.NewServeMux()
+	router.HandleFunc("POST /login", handler.Login)
+	router.HandleFunc("POST /logout", handler.Logout)
+	router.Handle("GET /metrics", promhttp.Handler())
+	server := httptest.NewServer(m.Middleware(router))
+	defer server.Close()
+
+	scrape := func() string {
+		resp, err := http.Get(server.URL + "/metrics")
+		if err != nil {
+			t.Fatalf("scrape /metrics: %v", err)
+		}
+		defer resp.Body.Close()
+		buf := make([]byte, 65536)
+		n, _ := resp.Body.Read(buf)
+		return string(buf[:n])
+	}
+
+	postLogin := func(password string) int {
+		body := `{"email":"` + fixture.user.Email + `","password":"` + password + `"}`
+		req, _ := http.NewRequest(http.MethodPost, server.URL+"/login", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("login request: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	before := scrape()
+	loginFailBefore := metricValue(t, before, "auth_authentication_failures_total", `kind="login"`)
+	reqBefore := metricValue(t, before, "auth_http_requests_total", "")
+
+	if code := postLogin("wrong-password"); code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for bad password, got %d", code)
+	}
+	if code := postLogin("password"); code != http.StatusOK {
+		t.Fatalf("expected 200 for good password, got %d", code)
+	}
+
+	after := scrape()
+	loginFailAfter := metricValue(t, after, "auth_authentication_failures_total", `kind="login"`)
+	if loginFailAfter != loginFailBefore+1 {
+		t.Fatalf("login failure metric = %v, want %v+1", loginFailAfter, loginFailBefore)
+	}
+	if metricValue(t, after, "auth_http_requests_total", "") <= reqBefore+1 {
+		t.Fatalf("request counter did not increase for login requests")
+	}
+
+	var baseline int64
+	if err := db.Model(&models.Event{}).Where("published_at IS NULL").Count(&baseline).Error; err != nil {
+		t.Fatal(err)
+	}
+	event := models.Event{
+		ID:        uuid.New(),
+		EventType: models.EventSessionRevoked,
+		UserID:    fixture.user.ID,
+		Payload: map[string]any{
+			"eventId":   uuid.New().String(),
+			"eventType": models.EventSessionRevoked,
+			"userId":    fixture.user.ID.String(),
+			"reason":    "sso_logout",
+			"occurredAt": time.Now().UTC(),
+		},
+		Status:    "pending",
+		CreatedAt: time.Now(),
+	}
+	if err := db.Create(&event).Error; err != nil {
+		t.Fatal(err)
+	}
+	var depth int64
+	if err := db.Model(&models.Event{}).Where("published_at IS NULL").Count(&depth).Error; err != nil {
+		t.Fatal(err)
+	}
+	if depth != baseline+1 {
+		t.Fatalf("event depth = %d, want %d", depth, baseline+1)
+	}
+	m.SetOutboxDepth(depth)
+	m.SetDBHealth(true)
+
+	afterEvent := scrape()
+	if got := metricValue(t, afterEvent, "auth_outbox_depth", ""); got != float64(depth) {
+		t.Fatalf("outbox depth metric = %v, want %v", got, depth)
+	}
+	if up := metricValue(t, afterEvent, "auth_dependency_up", ""); up != 1 {
+		t.Fatalf("database health gauge = %v, want 1", up)
+	}
+}
+
+// metricValue sums every exposition series for name, optionally filtered by a
+// label substring. Returns 0 when none match.
+func metricValue(t *testing.T, body, name, labelFilter string) float64 {
+	t.Helper()
+	var total float64
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !strings.HasPrefix(line, name) {
+			continue
+		}
+		if labelFilter != "" && !strings.Contains(line, labelFilter) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		value, err := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if err != nil {
+			continue
+		}
+		total += value
+	}
+	return total
 }

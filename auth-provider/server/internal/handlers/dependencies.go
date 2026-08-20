@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/metrics"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/models"
 	"github.com/google/uuid"
 )
@@ -215,6 +216,7 @@ func NewAuthHandlerWithDependencies(repos AuthRepositories, cfg AuthHandlerConfi
 		JWTSigningKey:      cfg.JWTSigningKey,
 		TokenStrategy:      cfg.TokenStrategy,
 		MFAEncryptionKey:   append([]byte(nil), cfg.MFAEncryptionKey...),
+		Metrics:            metrics.New(nil),
 	}
 }
 

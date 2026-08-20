@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/metrics"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/mfa"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/models"
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/server/internal/repository"
@@ -54,6 +55,7 @@ type AuthHandler struct {
 	JWTSigningKey      []byte
 	TokenStrategy      string
 	MFAEncryptionKey   []byte
+	Metrics            *metrics.Metrics
 }
 
 // GET /login
@@ -128,6 +130,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		} else {
 			h.audit(r, "LoginFailed", "failed", nil, nil, nil, nil)
 		}
+		h.recordAuthFailure("login")
 		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid credentials")
 		return
 	}
@@ -236,6 +239,7 @@ func (h *AuthHandler) LoginMFA(w http.ResponseWriter, r *http.Request) {
 	if input.Code == "" || !h.VerifyMFA(r.Context(), challenge.UserID, input.Code) {
 		userID := challenge.UserID
 		h.audit(r, "MFAFailed", "failed", &userID, nil, nil, nil)
+		h.recordAuthFailure("mfa")
 		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid MFA code")
 		return
 	}
@@ -509,6 +513,18 @@ func (h *AuthHandler) createSession(r *http.Request, userID uuid.UUID) (*models.
 
 func stringPtr(value string) *string { return &value }
 
+func (h *AuthHandler) recordAuthFailure(kind string) {
+	if h.Metrics != nil {
+		h.Metrics.RecordAuthFailure(kind)
+	}
+}
+
+func (h *AuthHandler) recordAuthzDenied() {
+	if h.Metrics != nil {
+		h.Metrics.RecordAuthzDenied()
+	}
+}
+
 func (h *AuthHandler) log() *slog.Logger {
 	if h.Logger != nil {
 		return h.Logger
@@ -641,6 +657,7 @@ func (h *AuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, repository.ErrUserNotFound) {
 			h.audit(r, "PolicyDenied", "failed", nil, &app.ID, &session.ID, nil)
+			h.recordAuthzDenied()
 			writeError(w, r, http.StatusForbidden, sharederrors.CodeAccessDenied, "access denied")
 			return
 		}
@@ -654,6 +671,7 @@ func (h *AuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		} else {
 			h.audit(r, "PolicyDenied", "failed", nil, &app.ID, &session.ID, nil)
 		}
+		h.recordAuthzDenied()
 		if user != nil && !user.IsActive() {
 			http.Redirect(w, r, loginRedirectTarget(r.URL.RequestURI()), http.StatusFound)
 			return
@@ -669,6 +687,7 @@ func (h *AuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	if !allowed {
 		h.audit(r, "PolicyDenied", "failed", &user.ID, &app.ID, &session.ID, nil)
+		h.recordAuthzDenied()
 		redirectOAuthError(w, r, req.RedirectURI, req.State, "access_denied")
 		return
 	}
