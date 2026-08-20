@@ -28,6 +28,9 @@ type TOTPStore interface {
 	FindByUserID(context.Context, uuid.UUID) (*models.UserTOTP, error)
 	EnrollPending(context.Context, uuid.UUID, []byte) error
 	Confirm(context.Context, uuid.UUID) error
+	ClaimEnrollAttempt(context.Context, uuid.UUID, int, time.Duration) (bool, error)
+	RecordEnrollFailure(context.Context, uuid.UUID, int, time.Duration) (bool, error)
+	ResetEnrollAttempts(context.Context, uuid.UUID) error
 }
 
 type ApplicationStore interface {

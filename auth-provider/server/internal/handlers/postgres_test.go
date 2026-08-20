@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -861,5 +862,120 @@ func TestPostgresMFAEnrollmentRequiresConfirmationBeforeLogin(t *testing.T) {
 	}
 	if confirmedProfile["mfa_required"] != true {
 		t.Fatalf("confirmed MFA must require second factor: %+v", confirmedProfile)
+	}
+}
+
+// TestPostgresEnrollFailureAttemptsBoundedUnderConcurrency proves that the
+// single conditional UPDATE in RecordEnrollFailure cannot be overshot by a
+// read-modify-write race: even with many concurrent failed confirmations, the
+// stored attempt count never exceeds the limit and the credential locks.
+func TestPostgresEnrollFailureAttemptsBoundedUnderConcurrency(t *testing.T) {
+	db := openAcceptancePostgres(t)
+	fixture := seedPostgresFlowFixture(t, db, false)
+	totpRepo := repository.NewTOTPRepository(db)
+
+	if err := totpRepo.EnrollPending(context.Background(), fixture.user.ID, []byte("encrypted-secret-bytes")); err != nil {
+		t.Fatal(err)
+	}
+
+	const maxAttempts = 5
+	const goroutines = 50
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			_, _ = totpRepo.RecordEnrollFailure(context.Background(), fixture.user.ID, maxAttempts, 15*time.Minute)
+		}()
+	}
+	wg.Wait()
+
+	var totp models.UserTOTP
+	if err := db.Where("user_id = ?", fixture.user.ID).First(&totp).Error; err != nil {
+		t.Fatal(err)
+	}
+	if totp.EnrollAttempts != maxAttempts {
+		t.Fatalf("expected exactly %d attempts, got %d (lost-update race)", maxAttempts, totp.EnrollAttempts)
+	}
+	if totp.EnrollLockedUntil == nil || !totp.EnrollLockedUntil.After(time.Now()) {
+		t.Fatalf("expected credential locked after %d attempts", maxAttempts)
+	}
+
+	// While locked, further failures must remain no-ops.
+	for i := 0; i < 10; i++ {
+		locked, err := totpRepo.RecordEnrollFailure(context.Background(), fixture.user.ID, maxAttempts, 15*time.Minute)
+		if err != nil {
+			t.Fatalf("unexpected error while locked: %v", err)
+		}
+		if !locked {
+			t.Fatal("expected locked result while locked")
+		}
+	}
+	if err := db.Where("user_id = ?", fixture.user.ID).First(&totp).Error; err != nil {
+		t.Fatal(err)
+	}
+	if totp.EnrollAttempts != maxAttempts {
+		t.Fatalf("locked credential attempt count changed: %d", totp.EnrollAttempts)
+	}
+}
+
+// TestPostgresEnrollAttemptReservationBoundedUnderConcurrency proves that
+// ClaimEnrollAttempt reserves the attempt atomically before any TOTP verification,
+// so a valid request cannot race past the attempt limit alongside concurrent
+// failures. Even with many goroutines, exactly maxAttempts attempts are granted
+// and the credential then locks.
+func TestPostgresEnrollAttemptReservationBoundedUnderConcurrency(t *testing.T) {
+	db := openAcceptancePostgres(t)
+	fixture := seedPostgresFlowFixture(t, db, false)
+	totpRepo := repository.NewTOTPRepository(db)
+
+	if err := totpRepo.EnrollPending(context.Background(), fixture.user.ID, []byte("encrypted-secret-bytes")); err != nil {
+		t.Fatal(err)
+	}
+
+	const maxAttempts = 5
+	const goroutines = 50
+	var granted int64
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			ok, err := totpRepo.ClaimEnrollAttempt(context.Background(), fixture.user.ID, maxAttempts, 15*time.Minute)
+			if err != nil {
+				t.Errorf("claim failed: %v", err)
+				return
+			}
+			if ok {
+				atomic.AddInt64(&granted, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if granted != maxAttempts {
+		t.Fatalf("expected exactly %d granted attempts, got %d (reservation race)", maxAttempts, granted)
+	}
+
+	var totp models.UserTOTP
+	if err := db.Where("user_id = ?", fixture.user.ID).First(&totp).Error; err != nil {
+		t.Fatal(err)
+	}
+	if totp.EnrollAttempts != maxAttempts {
+		t.Fatalf("expected exactly %d attempts, got %d", maxAttempts, totp.EnrollAttempts)
+	}
+	if totp.EnrollLockedUntil == nil || !totp.EnrollLockedUntil.After(time.Now()) {
+		t.Fatalf("expected credential locked after %d attempts", maxAttempts)
+	}
+
+	// A subsequent attempt must be denied while locked, and must not change the count.
+	if ok, err := totpRepo.ClaimEnrollAttempt(context.Background(), fixture.user.ID, maxAttempts, 15*time.Minute); err != nil || ok {
+		t.Fatalf("expected denied attempt while locked (ok=%v err=%v)", ok, err)
+	}
+	if err := db.Where("user_id = ?", fixture.user.ID).First(&totp).Error; err != nil {
+		t.Fatal(err)
+	}
+	if totp.EnrollAttempts != maxAttempts {
+		t.Fatalf("locked credential attempt count changed: %d", totp.EnrollAttempts)
 	}
 }

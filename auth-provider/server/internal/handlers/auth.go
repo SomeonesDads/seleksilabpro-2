@@ -26,6 +26,8 @@ const mfaPendingCookie = "mfa_pending"
 const ssoSessionCookie = "sso_session"
 const mfaChallengeTTL = 5 * time.Minute
 const mfaMaxAttempts = 5
+const enrollMaxAttempts = 5
+const enrollLockDuration = 15 * time.Minute
 
 type MFAVerifier func(context.Context, uuid.UUID, string) bool
 
@@ -328,10 +330,17 @@ func (h *AuthHandler) issueMFAEnrollment(r *http.Request, userID uuid.UUID) (otp
 // secret, stores it encrypted in an UNCONFIRMED (pending) state, and returns
 // the otpauth URI. The credential does not protect the account until
 // ConfirmMFAEnrollment succeeds (see DECISIONS/spec B01).
+//
+// A confirmed credential is preserved: enrollment only starts when none is
+// active, so visiting this endpoint cannot downgrade an existing MFA.
 func (h *AuthHandler) EnrollMFA(w http.ResponseWriter, r *http.Request) {
 	userID, ok := h.currentUserID(r)
 	if !ok {
 		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "authentication required")
+		return
+	}
+	if h.mfaAlreadyConfirmed(r, userID) {
+		writeError(w, r, http.StatusConflict, sharederrors.CodeConflict, "mfa already enrolled")
 		return
 	}
 	otpauthURI, secret, err := h.issueMFAEnrollment(r, userID)
@@ -348,12 +357,31 @@ func (h *AuthHandler) EnrollMFA(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// MFASettingsPage renders a self-service MFA enrollment page: it (re)starts a
-// pending enrollment and shows the otpauth secret plus a confirmation form.
+// mfaAlreadyConfirmed reports whether the user already has an active TOTP
+// credential. It tolerates lookup errors by conservatively reporting false.
+func (h *AuthHandler) mfaAlreadyConfirmed(r *http.Request, userID uuid.UUID) bool {
+	if h.TOTP == nil {
+		return false
+	}
+	cred, err := h.TOTP.FindByUserID(r.Context(), userID)
+	if err != nil {
+		return false
+	}
+	return cred.Confirmed
+}
+
+// MFASettingsPage renders a self-service MFA enrollment page. If MFA is already
+// active it shows that state without touching the existing credential;
+// otherwise it (re)starts a pending enrollment and shows the otpauth secret
+// plus a confirmation form.
 func (h *AuthHandler) MFASettingsPage(w http.ResponseWriter, r *http.Request) {
 	userID, ok := h.currentUserID(r)
 	if !ok {
 		http.Redirect(w, r, loginRedirectTarget("/mfa/enroll"), http.StatusFound)
+		return
+	}
+	if h.mfaAlreadyConfirmed(r, userID) {
+		renderMFAAlreadyActive(w)
 		return
 	}
 	otpauthURI, secret, err := h.issueMFAEnrollment(r, userID)
@@ -401,6 +429,26 @@ func (h *AuthHandler) ConfirmMFAEnrollment(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidRequest, "enrollment not initiated")
 		return
 	}
+	// Reserve this confirmation attempt atomically BEFORE verifying the code,
+	// mirroring the login-MFA ClaimAttempt flow. This prevents a valid request
+	// from racing past the attempt limit alongside concurrent failures: every
+	// attempt (valid or not) is counted in a single conditional UPDATE, so only
+	// enrollMaxAttempts attempts are ever permitted before the lock engages.
+	allowed, claimErr := h.TOTP.ClaimEnrollAttempt(r.Context(), userID, enrollMaxAttempts, enrollLockDuration)
+	if claimErr != nil {
+		h.log().Error("enroll attempt reservation failed", slog.Any("err", claimErr))
+		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "mfa unavailable")
+		return
+	}
+	if !allowed {
+		h.audit(r, "MFAFailed", "failed", &userID, nil, nil, nil)
+		if wantsHTML {
+			renderMFAConfirmResult(w, false, "Too many attempts. Try again later.")
+			return
+		}
+		writeError(w, r, http.StatusTooManyRequests, sharederrors.CodeInvalidRequest, "too many attempts")
+		return
+	}
 	if !h.VerifyMFA(r.Context(), userID, input.Code) {
 		h.audit(r, "MFAFailed", "failed", &userID, nil, nil, nil)
 		if wantsHTML {
@@ -419,6 +467,7 @@ func (h *AuthHandler) ConfirmMFAEnrollment(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid mfa code")
 		return
 	}
+	_ = h.TOTP.ResetEnrollAttempts(r.Context(), userID)
 	h.audit(r, "MFASucceeded", "success", &userID, nil, nil, nil)
 	if wantsHTML {
 		renderMFAConfirmResult(w, true, "")
@@ -877,7 +926,7 @@ func (h *AuthHandler) UserInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "user information unavailable")
 		return
 	}
-	_ = writeJSON(w, http.StatusOK, map[string]any{"sub": user.ID.String(), "email": user.Email, "name": user.Name, "groups": groups})
+	_ = writeJSON(w, http.StatusOK, map[string]any{"sub": user.ID.String(), "email": user.Email, "name": user.Name, "groups": groups, "centralSessionId": activeSession.ID.String()})
 }
 
 // POST /logout   (SSO / global logout, triggered from the Auth Portal UI)

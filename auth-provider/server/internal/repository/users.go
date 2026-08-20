@@ -14,6 +14,7 @@ import (
 var ErrUserNotFound = errors.New("user not found")
 var ErrMFAChallengeNotFound = errors.New("MFA challenge not found")
 var ErrTOTPNotFound = errors.New("TOTP credential not found")
+var ErrTOTPAlreadyConfirmed = errors.New("TOTP credential already confirmed")
 
 type UserRepository struct {
 	db *gorm.DB
@@ -121,23 +122,104 @@ func (r *TOTPRepository) Upsert(ctx context.Context, credential *models.UserTOTP
 // EnrollPending stores an unconfirmed TOTP credential. The encrypted secret is
 // written but confirmed stays false until Confirm succeeds, so a pending
 // enrollment never blocks login.
+//
+// A confirmed credential is never overwritten: visiting the enrollment page
+// must not downgrade an active MFA to password-only. Callers that want to
+// rotate a confirmed credential must first require current-MFA re-auth (not
+// implemented here) and then start a fresh enrollment.
 func (r *TOTPRepository) EnrollPending(ctx context.Context, userID uuid.UUID, encryptedSecret []byte) error {
 	var existing models.UserTOTP
 	err := r.db.WithContext(ctx).Where("user_id = ?", userID).First(&existing).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return r.db.WithContext(ctx).Create(&models.UserTOTP{
-			UserID:          userID,
-			EncryptedSecret: encryptedSecret,
-			Confirmed:       false,
+			UserID:             userID,
+			EncryptedSecret:    encryptedSecret,
+			Confirmed:          false,
+			EnrollAttempts:     0,
+			EnrollLockedUntil:  nil,
 		}).Error
 	}
 	if err != nil {
 		return err
 	}
+	if existing.Confirmed {
+		return ErrTOTPAlreadyConfirmed
+	}
 	return r.db.WithContext(ctx).Model(&existing).Updates(map[string]any{
-		"encrypted_secret": encryptedSecret,
-		"confirmed":        false,
+		"encrypted_secret":    encryptedSecret,
+		"confirmed":           false,
+		"enroll_attempts":     0,
+		"enroll_locked_until": nil,
 	}).Error
+}
+
+// RecordEnrollFailure counts a failed MFA enrollment confirmation and locks
+// further attempts once the bound is reached, mirroring the login-MFA attempt
+// policy. locked reports whether the credential is now blocked until
+// EnrollLockedUntil passes.
+//
+// The increment and lock assignment happen in a single conditional UPDATE so
+// concurrent confirmations cannot read-then-overwrite the same attempt count
+// (i.e. more than maxAttempts verifications can never succeed).
+func (r *TOTPRepository) RecordEnrollFailure(ctx context.Context, userID uuid.UUID, maxAttempts int, lock time.Duration) (locked bool, err error) {
+	now := time.Now()
+	res := r.db.WithContext(ctx).Model(&models.UserTOTP{}).
+		Where("user_id = ? AND (enroll_locked_until IS NULL OR enroll_locked_until < ?)", userID, now).
+		Updates(map[string]any{
+			"enroll_attempts": gorm.Expr("enroll_attempts + 1"),
+			"enroll_locked_until": gorm.Expr(
+				"CASE WHEN enroll_attempts + 1 >= ? THEN ? ELSE enroll_locked_until END",
+				maxAttempts, now.Add(lock)),
+		})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	if res.RowsAffected == 0 {
+		// No row updated: either the credential is missing or already locked.
+		var exists int64
+		if err := r.db.WithContext(ctx).Model(&models.UserTOTP{}).Where("user_id = ?", userID).Count(&exists).Error; err != nil {
+			return false, err
+		}
+		if exists == 0 {
+			return false, ErrTOTPNotFound
+		}
+		return true, nil
+	}
+	var totp models.UserTOTP
+	if err := r.db.WithContext(ctx).Select("enroll_locked_until").Where("user_id = ?", userID).First(&totp).Error; err != nil {
+		return false, err
+	}
+	return totp.EnrollLockedUntil != nil && totp.EnrollLockedUntil.After(time.Now()), nil
+}
+
+// ClaimEnrollAttempt atomically reserves one MFA enrollment-confirmation
+// attempt before the TOTP code is verified, mirroring the login-MFA
+// ClaimAttempt flow. The counter is incremented (and the lock set once the
+// bound is reached) in a single conditional UPDATE, so concurrent
+// confirmations cannot all pass a pre-check and verify before any reservation
+// is recorded. allowed reports whether this attempt is permitted; when false
+// the credential is locked and the caller must reject.
+func (r *TOTPRepository) ClaimEnrollAttempt(ctx context.Context, userID uuid.UUID, maxAttempts int, lock time.Duration) (allowed bool, err error) {
+	now := time.Now()
+	res := r.db.WithContext(ctx).Model(&models.UserTOTP{}).
+		Where("user_id = ? AND (enroll_locked_until IS NULL OR enroll_locked_until < ?)", userID, now).
+		Updates(map[string]any{
+			"enroll_attempts": gorm.Expr("enroll_attempts + 1"),
+			"enroll_locked_until": gorm.Expr(
+				"CASE WHEN enroll_attempts + 1 >= ? THEN ? ELSE enroll_locked_until END",
+				maxAttempts, now.Add(lock)),
+		})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+// ResetEnrollAttempts clears the failure counter and lock after a successful
+// enrollment confirmation.
+func (r *TOTPRepository) ResetEnrollAttempts(ctx context.Context, userID uuid.UUID) error {
+	return r.db.WithContext(ctx).Model(&models.UserTOTP{}).Where("user_id = ?", userID).
+		Updates(map[string]any{"enroll_attempts": 0, "enroll_locked_until": nil}).Error
 }
 
 // Confirm marks the user's pending TOTP credential as active.

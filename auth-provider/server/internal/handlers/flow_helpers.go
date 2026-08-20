@@ -246,6 +246,16 @@ func renderMFASettingsPage(w http.ResponseWriter, otpauthURI, secret string) {
 </body></html>`, html.EscapeString(otpauthURI), html.EscapeString(otpauthURI), html.EscapeString(secret))
 }
 
+// renderMFAAlreadyActive shows the MFA status when a confirmed credential
+// already exists. It deliberately does not start a new (downgrading)
+// enrollment or reveal the existing secret.
+func renderMFAAlreadyActive(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!doctype html><html><body><h1>Multi-factor authentication</h1>
+<p>MFA is already active on your account.</p>
+</body></html>`)
+}
+
 // renderMFAConfirmResult shows the outcome of an enrollment confirmation.
 func renderMFAConfirmResult(w http.ResponseWriter, success bool, message string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

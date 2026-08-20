@@ -105,12 +105,14 @@ type MFALoginChallenge struct {
 func (MFALoginChallenge) TableName() string { return "mfa_login_challenges" }
 
 type UserTOTP struct {
-	ID              uuid.UUID `gorm:"column:id;type:uuid;default:gen_random_uuid();primaryKey"`
-	UserID          uuid.UUID `gorm:"column:user_id;type:uuid;not null;uniqueIndex"`
-	EncryptedSecret []byte    `gorm:"column:encrypted_secret;type:bytea;not null"`
-	Confirmed       bool      `gorm:"column:confirmed;not null;default:false"`
-	CreatedAt       time.Time `gorm:"column:created_at;not null"`
-	UpdatedAt       time.Time `gorm:"column:updated_at;not null"`
+	ID                uuid.UUID `gorm:"column:id;type:uuid;default:gen_random_uuid();primaryKey"`
+	UserID            uuid.UUID `gorm:"column:user_id;type:uuid;not null;uniqueIndex"`
+	EncryptedSecret   []byte    `gorm:"column:encrypted_secret;type:bytea;not null"`
+	Confirmed         bool      `gorm:"column:confirmed;not null;default:false"`
+	EnrollAttempts    int       `gorm:"column:enroll_attempts;not null;default:0"`
+	EnrollLockedUntil *time.Time `gorm:"column:enroll_locked_until"`
+	CreatedAt         time.Time `gorm:"column:created_at;not null"`
+	UpdatedAt         time.Time `gorm:"column:updated_at;not null"`
 }
 
 func (UserTOTP) TableName() string { return "user_totp_credentials" }

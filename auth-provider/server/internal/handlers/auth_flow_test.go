@@ -222,7 +222,14 @@ func (flowTOTP) FindByUserID(context.Context, uuid.UUID) (*models.UserTOTP, erro
 	return &models.UserTOTP{Confirmed: true}, nil
 }
 func (flowTOTP) EnrollPending(context.Context, uuid.UUID, []byte) error { return nil }
-func (flowTOTP) Confirm(context.Context, uuid.UUID) error               { return nil }
+func (flowTOTP) Confirm(context.Context, uuid.UUID) error              { return nil }
+func (flowTOTP) RecordEnrollFailure(context.Context, uuid.UUID, int, time.Duration) (bool, error) {
+	return false, nil
+}
+func (flowTOTP) ClaimEnrollAttempt(context.Context, uuid.UUID, int, time.Duration) (bool, error) {
+	return true, nil
+}
+func (flowTOTP) ResetEnrollAttempts(context.Context, uuid.UUID) error { return nil }
 
 type flowMFA struct {
 	challenge      *models.MFALoginChallenge
@@ -271,7 +278,30 @@ func (emptyFlowTOTP) FindByUserID(context.Context, uuid.UUID) (*models.UserTOTP,
 	return nil, nil
 }
 func (emptyFlowTOTP) EnrollPending(context.Context, uuid.UUID, []byte) error { return nil }
-func (emptyFlowTOTP) Confirm(context.Context, uuid.UUID) error               { return nil }
+func (emptyFlowTOTP) Confirm(context.Context, uuid.UUID) error              { return nil }
+func (emptyFlowTOTP) RecordEnrollFailure(context.Context, uuid.UUID, int, time.Duration) (bool, error) {
+	return false, nil
+}
+func (emptyFlowTOTP) ClaimEnrollAttempt(context.Context, uuid.UUID, int, time.Duration) (bool, error) {
+	return true, nil
+}
+func (emptyFlowTOTP) ResetEnrollAttempts(context.Context, uuid.UUID) error { return nil }
+
+// enrollFlowTOTP reports an unconfirmed credential so enrollment can start.
+type enrollFlowTOTP struct{}
+
+func (enrollFlowTOTP) FindByUserID(context.Context, uuid.UUID) (*models.UserTOTP, error) {
+	return &models.UserTOTP{Confirmed: false}, nil
+}
+func (enrollFlowTOTP) EnrollPending(context.Context, uuid.UUID, []byte) error { return nil }
+func (enrollFlowTOTP) Confirm(context.Context, uuid.UUID) error              { return nil }
+func (enrollFlowTOTP) RecordEnrollFailure(context.Context, uuid.UUID, int, time.Duration) (bool, error) {
+	return false, nil
+}
+func (enrollFlowTOTP) ClaimEnrollAttempt(context.Context, uuid.UUID, int, time.Duration) (bool, error) {
+	return true, nil
+}
+func (enrollFlowTOTP) ResetEnrollAttempts(context.Context, uuid.UUID) error { return nil }
 
 func TestLoginIntentIsRevalidatedAgainstAuthorizationRequest(t *testing.T) {
 	application := models.Application{ID: uuid.New(), ClientID: "app-client", Status: "active"}
@@ -913,7 +943,7 @@ func TestMFASettingsPageRendersEnrollmentForm(t *testing.T) {
 		created: session,
 	}
 	handler := NewAuthHandlerWithDependencies(AuthRepositories{
-		TOTP:              &flowTOTP{},
+		TOTP:              &enrollFlowTOTP{},
 		Sessions:          sessions,
 		SessionLookup:     sessions,
 		SessionRevocation: sessions,
@@ -942,5 +972,31 @@ func TestMFASettingsPageRendersEnrollmentForm(t *testing.T) {
 	}
 	if !strings.Contains(confirmResponse.Body.String(), "MFA activated") {
 		t.Fatalf("MFA confirm did not render success page: %s", confirmResponse.Body.String())
+	}
+}
+
+// TestEnrollMFADoesNotDowngradeConfirmed ensures that starting an enrollment
+// for an account that already has an active MFA credential is rejected rather
+// than silently downgrading it to password-only.
+func TestEnrollMFADoesNotDowngradeConfirmed(t *testing.T) {
+	session := &models.SSOSession{ID: uuid.New(), UserID: uuid.New(), Status: "active", ExpiresAt: time.Now().Add(time.Hour)}
+	sessions := &flowSessions{
+		byHash:  map[string]*models.SSOSession{idgen.HashToken("downgrade-session"): session},
+		created: session,
+	}
+	handler := NewAuthHandlerWithDependencies(AuthRepositories{
+		TOTP:              &flowTOTP{}, // FindByUserID reports Confirmed: true
+		Sessions:          sessions,
+		SessionLookup:     sessions,
+		SessionRevocation: sessions,
+	}, AuthHandlerConfig{MFAEncryptionKey: []byte("0123456789abcdef0123456789abcdef")}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/mfa/enroll", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: ssoSessionCookie, Value: "downgrade-session"})
+	rec := httptest.NewRecorder()
+	handler.EnrollMFA(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for already-enrolled MFA, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
