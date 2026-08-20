@@ -19,7 +19,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
-	"golang.org/x/crypto/bcrypt"
 )
 
 const mfaPendingCookie = "mfa_pending"
@@ -108,20 +107,14 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "authentication unavailable")
 		return
 	}
-	user, err := h.Users.FindByEmail(r.Context(), input.Email)
+	user, ok, err := h.Users.VerifyPassword(r.Context(), input.Email, input.Password)
 	if err != nil {
-		if errors.Is(err, repository.ErrUserNotFound) {
-			h.audit(r, "LoginFailed", "failed", nil, nil, nil, nil)
-			writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid credentials")
-			return
-		}
-		h.log().Error("user lookup failed", slog.Any("err", err))
+		h.log().Error("user authentication failed", slog.Any("err", err))
 		h.audit(r, "LoginFailed", "failed", nil, nil, nil, nil)
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "authentication unavailable")
 		return
 	}
-	// 2. Compare password + cek aktif/ga
-	if user == nil || !user.IsActive() || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password)) != nil {
+	if !ok {
 		if user != nil {
 			userID := user.ID
 			h.audit(r, "LoginFailed", "failed", &userID, nil, nil, nil)

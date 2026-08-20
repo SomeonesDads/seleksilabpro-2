@@ -34,6 +34,15 @@ func (s *flowUsers) FindByEmail(_ context.Context, email string) (*models.User, 
 	return &s.user, nil
 }
 
+func (s *flowUsers) VerifyPassword(_ context.Context, email, password string) (*models.User, bool, error) {
+	user, err := s.FindByEmail(context.Background(), email)
+	if err != nil {
+		return nil, false, nil
+	}
+	ok := user.IsActive() && password == "password"
+	return user, ok, nil
+}
+
 func (s *flowUsers) FindByID(_ context.Context, id uuid.UUID) (*models.User, error) {
 	if s.missingByID {
 		return nil, repository.ErrUserNotFound

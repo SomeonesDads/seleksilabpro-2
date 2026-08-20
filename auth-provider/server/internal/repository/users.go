@@ -240,6 +240,24 @@ func NewUserRepository(db *gorm.DB) *UserRepository {
 	return &UserRepository{db: db}
 }
 
+// VerifyPassword authenticates a user by email and password. It never discloses
+// whether the email exists: a missing user and a wrong password both return
+// ok=false with a nil error. Inactive users are rejected. The matched user is
+// returned on failure too, so callers can attribute the audit event.
+func (r *UserRepository) VerifyPassword(ctx context.Context, email, password string) (*models.User, bool, error) {
+	user, err := r.FindByEmail(ctx, email)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if !user.IsActive() || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+		return user, false, nil
+	}
+	return user, true, nil
+}
+
 // return 1 user dari emailny
 func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*models.User, error) {
 	var user models.User

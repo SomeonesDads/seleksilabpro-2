@@ -11,6 +11,7 @@ import (
 
 type UserStore interface {
 	FindByEmail(context.Context, string) (*models.User, error)
+	VerifyPassword(context.Context, string, string) (*models.User, bool, error)
 }
 
 type UserProfileStore interface {
