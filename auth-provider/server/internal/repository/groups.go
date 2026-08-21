@@ -13,6 +13,7 @@ import (
 type GroupRepository struct{ db *gorm.DB }
 
 var ErrGroupNotFound = errors.New("group not found")
+var ErrGroupMembershipNotFound = errors.New("group membership not found")
 
 func NewGroupRepository(db *gorm.DB) *GroupRepository { return &GroupRepository{db: db} }
 
@@ -77,8 +78,12 @@ func (r *GroupRepository) RemoveUser(ctx context.Context, groupID, userID uuid.U
 			return err
 		}
 
-		if err := tx.Where("group_id = ? AND user_id = ?", groupID, userID).Delete(&models.UserGroup{}).Error; err != nil {
-			return err
+		result := tx.Where("group_id = ? AND user_id = ?", groupID, userID).Delete(&models.UserGroup{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrGroupMembershipNotFound
 		}
 
 		now := time.Now()

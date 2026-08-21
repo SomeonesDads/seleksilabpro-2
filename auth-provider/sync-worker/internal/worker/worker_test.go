@@ -13,9 +13,9 @@ import (
 
 	"github.com/SomeonesDads/seleksilabpro-2/auth-provider/sync-worker/internal/metrics"
 	"github.com/google/uuid"
-	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 type fakeAcknowledger struct {
@@ -163,6 +163,13 @@ func TestHandleDeliveryRetriesIndependentlyAndDeadLettersPermanentFailure(t *tes
 	}
 	if store.states[deliveryKey(payload.EventID, appAID)].Status != "failed" || store.states[deliveryKey(payload.EventID, appBID)].Status != "succeeded" {
 		t.Fatalf("delivery states = %+v", store.states)
+	}
+
+	// A redelivery must not ACK an event whose target is already terminally
+	// failed; RabbitMQ must keep routing it to the DLQ.
+	w.HandleDelivery(context.Background(), deliveryFor(ack, payload))
+	if len(ack.nacks) != 2 || ack.nacks[1] {
+		t.Fatalf("terminal failure redelivery acknowledgement = %v", ack.nacks)
 	}
 }
 

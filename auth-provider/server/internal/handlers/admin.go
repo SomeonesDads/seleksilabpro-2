@@ -44,6 +44,14 @@ func adminUser(user *models.User) map[string]any {
 	return map[string]any{"id": user.ID, "name": user.Name, "email": user.Email, "status": user.Status, "created_at": user.CreatedAt, "updated_at": user.UpdatedAt}
 }
 
+func adminGroup(group *models.Group) map[string]any {
+	m := map[string]any{"id": group.ID, "name": group.Name}
+	if group.Description != nil {
+		m["description"] = *group.Description
+	}
+	return m
+}
+
 func adminApplication(application *models.Application) map[string]any {
 	return map[string]any{"id": application.ID, "name": application.Name, "client_id": application.ClientID, "status": application.Status, "launch_url": application.LaunchURL, "logout_notification_url": application.LogoutNotificationURL, "created_at": application.CreatedAt, "updated_at": application.UpdatedAt}
 }
@@ -56,10 +64,18 @@ func adminID(r *http.Request, name string) (uuid.UUID, bool) {
 func adminRequired(value string) bool { return strings.TrimSpace(value) != "" }
 
 func adminRepositoryError(w http.ResponseWriter, r *http.Request, err error, resource string) {
+	if errors.Is(err, repository.ErrGroupMembershipNotFound) {
+		writeError(w, r, http.StatusNotFound, sharederrors.CodeNotFound, "group membership not found")
+		return
+	}
 	if repository.IsConflict(err) {
 		// Keep uniqueness details generic. In particular, do not reveal whether
 		// an email address is already registered through the admin API.
 		writeError(w, r, http.StatusConflict, sharederrors.CodeConflict, "request conflicts with an existing resource")
+		return
+	}
+	if repository.IsForeignKeyViolation(err) {
+		writeError(w, r, http.StatusNotFound, sharederrors.CodeNotFound, "referenced resource not found")
 		return
 	}
 	writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, resource+" unavailable")
@@ -67,6 +83,10 @@ func adminRepositoryError(w http.ResponseWriter, r *http.Request, err error, res
 
 func (h *AdminHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	if h.Repos.Users == nil {
+		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "users unavailable")
+		return
+	}
+	if h.Repos.Users == nil || h.Repos.Groups == nil {
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "users unavailable")
 		return
 	}
@@ -78,7 +98,18 @@ func (h *AdminHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	result := make([]map[string]any, 0, len(users))
 	for i := range users {
-		result = append(result, adminUser(&users[i]))
+		row := adminUser(&users[i])
+		groups, gerr := h.Repos.Groups.FindByUserID(r.Context(), users[i].ID)
+		if gerr != nil {
+			adminRepositoryError(w, r, gerr, "users")
+			return
+		}
+		groupViews := make([]map[string]any, 0, len(groups))
+		for j := range groups {
+			groupViews = append(groupViews, map[string]any{"id": groups[j].ID, "name": groups[j].Name})
+		}
+		row["groups"] = groupViews
+		result = append(result, row)
 	}
 	_ = writeJSON(w, http.StatusOK, map[string]any{"users": result})
 }
@@ -220,7 +251,11 @@ func (h *AdminHandler) ListGroups(w http.ResponseWriter, r *http.Request) {
 		adminRepositoryError(w, r, err, "groups")
 		return
 	}
-	_ = writeJSON(w, http.StatusOK, map[string]any{"groups": groups})
+	views := make([]map[string]any, 0, len(groups))
+	for i := range groups {
+		views = append(views, adminGroup(&groups[i]))
+	}
+	_ = writeJSON(w, http.StatusOK, map[string]any{"groups": views})
 }
 
 func (h *AdminHandler) CreateGroup(w http.ResponseWriter, r *http.Request) {
@@ -242,7 +277,7 @@ func (h *AdminHandler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, "GroupChanged", "success", nil, nil)
-	_ = writeJSON(w, http.StatusCreated, group)
+	_ = writeJSON(w, http.StatusCreated, adminGroup(group))
 }
 
 func (h *AdminHandler) AddUserToGroup(w http.ResponseWriter, r *http.Request) {
@@ -251,8 +286,19 @@ func (h *AdminHandler) AddUserToGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	groupID, groupOK := adminID(r, "id")
-	userID, userErr := uuid.Parse(r.PathValue("userId"))
-	if !groupOK || userErr != nil {
+	if !groupOK {
+		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidRequest, "invalid group or user id")
+		return
+	}
+	var input struct {
+		UserID string `json:"userId"`
+	}
+	if err := decodeJSONBody(r, &input); err != nil || strings.TrimSpace(input.UserID) == "" {
+		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidRequest, "invalid group or user id")
+		return
+	}
+	userID, userErr := uuid.Parse(strings.TrimSpace(input.UserID))
+	if userErr != nil {
 		writeError(w, r, http.StatusBadRequest, sharederrors.CodeInvalidRequest, "invalid group or user id")
 		return
 	}
@@ -452,6 +498,10 @@ func (h *AdminHandler) GetUserStatusOverview(w http.ResponseWriter, r *http.Requ
 		adminRepositoryError(w, r, err, "overview")
 		return
 	}
+	groupViews := make([]map[string]any, 0, len(groups))
+	for i := range groups {
+		groupViews = append(groupViews, adminGroup(&groups[i]))
+	}
 	applications, err := h.Repos.Applications.List(r.Context())
 	if err != nil {
 		adminRepositoryError(w, r, err, "overview")
@@ -468,5 +518,5 @@ func (h *AdminHandler) GetUserStatusOverview(w http.ResponseWriter, r *http.Requ
 		}
 		policies[applications[i].ID.String()] = items
 	}
-	_ = writeJSON(w, http.StatusOK, map[string]any{"user": adminUser(user), "groups": groups, "applications": applicationViews, "policies": policies})
+	_ = writeJSON(w, http.StatusOK, map[string]any{"user": adminUser(user), "groups": groupViews, "applications": applicationViews, "policies": policies})
 }

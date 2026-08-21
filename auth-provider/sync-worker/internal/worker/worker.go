@@ -115,14 +115,26 @@ func (w *Worker) HandleDelivery(ctx context.Context, d amqp.Delivery) {
 
 	targets, err := w.targets(ctx, payload)
 	if err != nil {
-		w.logger().Error("event target resolution failed", slog.Any("err", err))
+		w.logger().Error("event target resolution failed",
+			slog.String("eventId", payload.EventID.String()),
+			slog.Any("err", err),
+		)
 		w.nack(d, !errors.Is(err, ErrTargetConfiguration))
 		return
 	}
 	if len(targets) == 0 {
+		w.logger().Info("event has no delivery targets; acknowledging",
+			slog.String("eventId", payload.EventID.String()),
+			slog.String("eventType", payload.EventType),
+		)
 		w.ack(d)
 		return
 	}
+	w.logger().Info("event targets resolved",
+		slog.String("eventId", payload.EventID.String()),
+		slog.String("eventType", payload.EventType),
+		slog.Int("targetCount", len(targets)),
+	)
 
 	transientFailure := false
 	permanentFailure := false
@@ -216,12 +228,27 @@ func (w *Worker) deliverTarget(ctx context.Context, payload EventPayload, target
 			return deliveryResult{}
 		}
 		if state.Status == "failed" {
-			return deliveryResult{}
+			w.logger().Warn("delivery already exhausted; keeping event for DLQ",
+				slog.String("eventId", payload.EventID.String()),
+				slog.String("eventType", payload.EventType),
+				slog.String("application", app),
+				slog.String("applicationId", target.ApplicationID.String()),
+			)
+			return deliveryResult{failed: true}
 		}
 		attempt := state.AttemptCount
 		if attempt <= 0 {
 			return deliveryResult{err: errors.New("delivery attempt was not recorded")}
 		}
+		maxAttempts := w.maxRetries()
+		w.logger().Info("delivery attempt",
+			slog.String("eventId", payload.EventID.String()),
+			slog.String("eventType", payload.EventType),
+			slog.String("application", app),
+			slog.String("applicationId", target.ApplicationID.String()),
+			slog.Int("attempt", attempt),
+			slog.Int("maxAttempts", maxAttempts),
+		)
 		w.recordDeliveryAttempt(app, "attempt")
 
 		err = w.deliverToApp(ctx, target, payload)
@@ -230,24 +257,50 @@ func (w *Worker) deliverTarget(ctx context.Context, payload EventPayload, target
 			if markErr := w.Store.MarkDeliverySucceeded(ctx, payload.EventID, target.ApplicationID, time.Now().UTC()); markErr != nil {
 				return deliveryResult{err: markErr}
 			}
+			w.logger().Info("delivery succeeded",
+				slog.String("eventId", payload.EventID.String()),
+				slog.String("application", app),
+				slog.Int("attempt", attempt),
+			)
 			return deliveryResult{}
 		}
 		if ctx.Err() != nil {
 			return deliveryResult{err: ctx.Err()}
 		}
-		if attempt >= w.maxRetries() {
-			w.recordDeliveryPermanentFailure(app)
+		if attempt >= maxAttempts {
 			if markErr := w.Store.MarkDeliveryFailed(ctx, payload.EventID, target.ApplicationID, time.Now().UTC(), err); markErr != nil {
 				return deliveryResult{err: markErr}
 			}
+			w.recordDeliveryPermanentFailure(app)
+			w.logger().Error("delivery retries exhausted; event will be dead-lettered",
+				slog.String("eventId", payload.EventID.String()),
+				slog.String("eventType", payload.EventType),
+				slog.String("application", app),
+				slog.String("applicationId", target.ApplicationID.String()),
+				slog.Int("attempt", attempt),
+				slog.Int("maxAttempts", maxAttempts),
+				slog.Any("err", err),
+			)
 			return deliveryResult{failed: true}
 		}
 
-		w.recordDeliveryRetry(app)
-		nextRetryAt := time.Now().UTC().Add(backoffFor(attempt-1, w.BaseBackoff, w.MaxBackoff))
+		backoff := backoffFor(attempt-1, w.BaseBackoff, w.MaxBackoff)
+		nextRetryAt := time.Now().UTC().Add(backoff)
 		if markErr := w.Store.MarkDeliveryRetrying(ctx, payload.EventID, target.ApplicationID, nextRetryAt, err); markErr != nil {
 			return deliveryResult{err: markErr}
 		}
+		w.recordDeliveryRetry(app)
+		w.logger().Warn("delivery failed; retry scheduled",
+			slog.String("eventId", payload.EventID.String()),
+			slog.String("eventType", payload.EventType),
+			slog.String("application", app),
+			slog.String("applicationId", target.ApplicationID.String()),
+			slog.Int("attempt", attempt),
+			slog.Int("maxAttempts", maxAttempts),
+			slog.Duration("backoff", backoff),
+			slog.Time("nextRetryAt", nextRetryAt),
+			slog.Any("err", err),
+		)
 		if err := wait(ctx, time.Until(nextRetryAt)); err != nil {
 			return deliveryResult{err: err}
 		}

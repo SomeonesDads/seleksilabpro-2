@@ -73,11 +73,16 @@ func (h *PanelHandler) Users(w http.ResponseWriter, r *http.Request) {
 <label>Status <select name="status"><option value="active">active</option><option value="inactive">inactive</option></select></label>
 <button type="submit">Create</button>
 </form>
-<h2>Users</h2><table border="1"><tr><th>Name</th><th>Email</th><th>Status</th><th>Actions</th></tr>`)
+	<h2>Users</h2><table border="1"><tr><th>Name</th><th>Email</th><th>Status</th><th>Groups</th><th>Actions</th></tr>`)
 	for _, u := range users {
 		id := strField(u, "id")
 		b.WriteString("<tr>")
 		b.WriteString(fmt.Sprintf("<td>%s</td><td>%s</td><td>%s</td>", html.EscapeString(strField(u, "name")), html.EscapeString(strField(u, "email")), html.EscapeString(strField(u, "status"))))
+		var groupNames []string
+		for _, g := range listField(u, "groups") {
+			groupNames = append(groupNames, html.EscapeString(strField(g, "name")))
+		}
+		b.WriteString(fmt.Sprintf("<td>%s</td>", strings.Join(groupNames, ", ")))
 		b.WriteString("<td>")
 		b.WriteString(fmt.Sprintf("<form method=\"post\" action=\"/users/status\" style=\"display:inline\">"+
 			"<input type=\"hidden\" name=\"id\" value=\"%s\"><input type=\"hidden\" name=\"status\" value=\"%s\">"+
@@ -157,6 +162,12 @@ func (h *PanelHandler) Groups(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	groups := decodeList(resp, "groups")
+	usersResp, ok := h.proxyDo(w, r, http.MethodGet, "/admin/users", nil, "")
+	if !ok {
+		return
+	}
+	defer usersResp.Body.Close()
+	users := decodeList(usersResp, "users")
 
 	var b strings.Builder
 	b.WriteString(`<h2>Create group</h2>
@@ -166,16 +177,62 @@ func (h *PanelHandler) Groups(w http.ResponseWriter, r *http.Request) {
 <button type="submit">Create</button>
 </form>
 <h2>Groups</h2><ul>`)
+	userLabel := func(user map[string]any) string {
+		userID := strField(user, "id")
+		label := strField(user, "name")
+		if label == "" {
+			label = strField(user, "email")
+		}
+		if email := strField(user, "email"); email != "" && label != email {
+			label += " (" + email + ")"
+		}
+		if label == "" {
+			label = userID
+		}
+		return label
+	}
 	for _, g := range groups {
 		id := strField(g, "id")
-		b.WriteString("<li>")
-		b.WriteString(fmt.Sprintf("%s ", html.EscapeString(strField(g, "name"))))
-		b.WriteString(fmt.Sprintf("<form method=\"post\" action=\"/groups/members\" style=\"display:inline\">"+
-			"<input type=\"hidden\" name=\"id\" value=\"%s\"><input name=\"userId\" placeholder=\"user id\" required><button type=\"submit\">Add member</button></form> ",
-			html.EscapeString(id)))
-		b.WriteString(fmt.Sprintf("<form method=\"post\" action=\"/groups/members/delete\" style=\"display:inline\">"+
-			"<input type=\"hidden\" name=\"id\" value=\"%s\"><input name=\"userId\" placeholder=\"user id\" required><button type=\"submit\">Remove member</button></form>",
-			html.EscapeString(id)))
+		b.WriteString(fmt.Sprintf("<li><strong>%s</strong><br>Members: ", html.EscapeString(strField(g, "name"))))
+		isMember := func(user map[string]any) bool {
+			for _, membership := range listField(user, "groups") {
+				if strField(membership, "id") == id {
+					return true
+				}
+			}
+			return false
+		}
+		memberCount := 0
+		for _, user := range users {
+			if !isMember(user) {
+				continue
+			}
+			if memberCount > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(html.EscapeString(userLabel(user)))
+			memberCount++
+		}
+		if memberCount == 0 {
+			b.WriteString("none")
+		}
+		b.WriteString("<br>")
+		b.WriteString(fmt.Sprintf("<form method=\"post\" action=\"/groups/members\" style=\"display:inline\"><input type=\"hidden\" name=\"id\" value=\"%s\"><label>Add member <select name=\"userId\" required><option value=\"\">Select user</option>", html.EscapeString(id)))
+		for _, user := range users {
+			userID := strField(user, "id")
+			if userID == "" || isMember(user) {
+				continue
+			}
+			b.WriteString(fmt.Sprintf("<option value=\"%s\">%s</option>", html.EscapeString(userID), html.EscapeString(userLabel(user))))
+		}
+		b.WriteString("</select></label> <button type=\"submit\">Add member</button></form>")
+		for _, user := range users {
+			userID := strField(user, "id")
+			if userID == "" || !isMember(user) {
+				continue
+			}
+			b.WriteString(fmt.Sprintf(" <form method=\"post\" action=\"/groups/members/delete\" style=\"display:inline\"><input type=\"hidden\" name=\"id\" value=\"%s\"><input type=\"hidden\" name=\"userId\" value=\"%s\"><button type=\"submit\">Remove %s</button></form>", html.EscapeString(id), html.EscapeString(userID), html.EscapeString(userLabel(user))))
+		}
 		b.WriteString("</li>")
 	}
 	b.WriteString("</ul>")
@@ -191,6 +248,26 @@ func (h *PanelHandler) Applications(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	apps := decodeList(resp, "applications")
+	groupsResp, ok := h.proxyDo(w, r, http.MethodGet, "/admin/groups", nil, "")
+	if !ok {
+		return
+	}
+	defer groupsResp.Body.Close()
+	groups := decodeList(groupsResp, "groups")
+
+	var groupOptions strings.Builder
+	groupOptions.WriteString(`<option value="">Select group</option>`)
+	for _, group := range groups {
+		id := strField(group, "id")
+		if id == "" {
+			continue
+		}
+		name := strField(group, "name")
+		if name == "" {
+			name = id
+		}
+		groupOptions.WriteString(fmt.Sprintf(`<option value="%s">%s</option>`, html.EscapeString(id), html.EscapeString(name)))
+	}
 
 	var b strings.Builder
 	b.WriteString(`<h2>Register application</h2>
@@ -211,11 +288,11 @@ func (h *PanelHandler) Applications(w http.ResponseWriter, r *http.Request) {
 			"<input type=\"hidden\" name=\"id\" value=\"%s\"><input name=\"redirect_uri\" placeholder=\"redirect uri\" required><button type=\"submit\">Add URI</button></form> ",
 			html.EscapeString(id)))
 		b.WriteString(fmt.Sprintf("<form method=\"post\" action=\"/applications/policies\" style=\"display:inline\">"+
-			"<input type=\"hidden\" name=\"id\" value=\"%s\"><input name=\"group_id\" placeholder=\"group id\" required><button type=\"submit\">Allow group</button></form> ",
-			html.EscapeString(id)))
+			"<input type=\"hidden\" name=\"id\" value=\"%s\"><label>Allow group <select name=\"group_id\" required>%s</select></label><button type=\"submit\">Allow group</button></form> ",
+			html.EscapeString(id), groupOptions.String()))
 		b.WriteString(fmt.Sprintf("<form method=\"post\" action=\"/applications/policies/delete\" style=\"display:inline\">"+
-			"<input type=\"hidden\" name=\"id\" value=\"%s\"><input name=\"group_id\" placeholder=\"group id\" required><button type=\"submit\">Remove policy</button></form>",
-			html.EscapeString(id)))
+			"<input type=\"hidden\" name=\"id\" value=\"%s\"><label>Remove group <select name=\"group_id\" required>%s</select></label><button type=\"submit\">Remove policy</button></form>",
+			html.EscapeString(id), groupOptions.String()))
 		b.WriteString("</td></tr>")
 	}
 	b.WriteString("</table>")
