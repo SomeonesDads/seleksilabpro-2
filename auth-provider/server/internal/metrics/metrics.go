@@ -29,8 +29,9 @@ type Metrics struct {
 	httpDuration     *prometheus.HistogramVec
 	authFailures     *prometheus.CounterVec
 	authzDenied      prometheus.Counter
-	outboxDepth      prometheus.Gauge
-	dbUp             prometheus.Gauge
+		outboxDepth      prometheus.Gauge
+		dbUp             prometheus.Gauge
+		brokerUp         prometheus.Gauge
 	workerAttempts   *prometheus.CounterVec
 	workerSuccesses  prometheus.Counter
 	workerRetries    prometheus.Counter
@@ -78,6 +79,10 @@ func build(reg prometheus.Registerer) *Metrics {
 		dbUp: f.NewGauge(prometheus.GaugeOpts{
 			Name: "auth_dependency_up",
 			Help: "Health state of a required dependency, 1 = up, 0 = down. Labeled by component.",
+		}),
+		brokerUp: f.NewGauge(prometheus.GaugeOpts{
+			Name: "auth_broker_up",
+			Help: "Health state of the RabbitMQ broker dependency, 1 = up, 0 = down.",
 		}),
 		workerAttempts: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "auth_worker_delivery_attempts_total",
@@ -150,6 +155,15 @@ func (m *Metrics) SetDBHealth(up bool) {
 		m.dbUp.Set(1)
 	} else {
 		m.dbUp.Set(0)
+	}
+}
+
+// SetBrokerHealth reports the RabbitMQ broker dependency state.
+func (m *Metrics) SetBrokerHealth(up bool) {
+	if up {
+		m.brokerUp.Set(1)
+	} else {
+		m.brokerUp.Set(0)
 	}
 }
 
