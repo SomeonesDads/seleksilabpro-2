@@ -85,7 +85,8 @@ func TestDrainWorkCancelsBeforeFinalization(t *testing.T) {
 // a repeated shutdown signal cannot double-close or panic.
 func armedShutdownCh() chan context.Context {
 	c := make(chan context.Context, 1)
-	ctx, _ := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	cancel()
 	c <- ctx
 	return c
 }
