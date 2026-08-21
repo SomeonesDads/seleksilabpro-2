@@ -470,6 +470,42 @@ Test integrasi yang memakai database atau broker membutuhkan PostgreSQL dan
 RabbitMQ disposable. Untuk integration test persistence Sync Worker, set
 `TEST_DATABASE_URL` sesuai instruksi test sebelum menjalankan test terkait.
 
-## Screenshot
+## Screenshots
 
-OTW
+### 01. Control Panel Login
+
+![Control Panel login](docs/screenshots/01-control-panel-login.png)
+
+### 02. Control Panel Dashboard
+
+![Control Panel dashboard](docs/screenshots/02-control-panel-dashboard.png)
+
+### 03. Users & Groups Management
+
+![Users and Groups](docs/screenshots/03-control-panel-users-groups.png)
+
+### 04. Application Registration & Client Secret
+
+![Application secret provisioning](docs/screenshots/04-control-panel-application-secret.png)
+
+### 05. App A Dashboard After OAuth Login
+
+![App A dashboard](docs/screenshots/05-app-a-dashboard.png)
+
+### 06. App B Dashboard (SSO Session Reuse)
+
+![App B dashboard](docs/screenshots/06-app-b-dashboard.png)
+
+### 07. MFA Enrollment
+
+![MFA enrollment](docs/screenshots/07-mfa-enrollment.png)
+
+### 08. SSO Revocation
+
+![SSO revocation](docs/screenshots/08-sso-revocation.png)
+
+### 09. Health & Metrics
+
+![Health and metrics](docs/screenshots/09-health-metrics.png)
+
+![Health and metrics](docs/screenshots/09-health-metrics2.png)
