@@ -1,0 +1,31 @@
+# Build context is the repository root. Keep secrets and local artifacts
+# out of the images; the Dockerfiles copy only the source trees they build.
+
+# Secrets / local env (never baked into an image)
+.env
+**/.env
+.env.*
+**/.env.*
+
+# VCS and local tooling
+.git
+.gitignore
+.gitattributes
+
+# Local scratch / build output
+tmp/
+**/tmp/
+bin/
+**/bin/
+*.exe
+*.test
+*.out
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+
+# Go workspace file (modules resolve via local replace directives, not go.work)
+go.work
+go.work.sum
