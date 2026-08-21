@@ -55,6 +55,7 @@ type AuthHandler struct {
 	JWTSigningKey      []byte
 	TokenStrategy      string
 	MFAEncryptionKey   []byte
+	SecureCookies      bool
 	Metrics            *metrics.Metrics
 }
 
@@ -186,7 +187,7 @@ issueMFAChallenge:
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "authentication unavailable")
 		return
 	}
-	setAuthCookie(w, mfaPendingCookie, rawToken, mfaChallengeTTL)
+	setAuthCookie(w, mfaPendingCookie, rawToken, mfaChallengeTTL, h.SecureCookies)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"mfa_required": true, "expires_in": int(mfaChallengeTTL.Seconds()), "return_to": intent})
 }
@@ -269,8 +270,8 @@ func (h *AuthHandler) LoginMFA(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, sharederrors.CodeUnauthorized, "invalid MFA challenge")
 		return
 	}
-	clearAuthCookie(w, mfaPendingCookie)
-	setAuthCookie(w, ssoSessionCookie, rawSessionToken, h.sessionTTL())
+	clearAuthCookie(w, mfaPendingCookie, h.SecureCookies)
+	setAuthCookie(w, ssoSessionCookie, rawSessionToken, h.sessionTTL(), h.SecureCookies)
 	userID := challenge.UserID
 	sessionID := session.ID
 	h.audit(r, "MFASucceeded", "success", &userID, nil, &sessionID, nil)
@@ -485,7 +486,7 @@ func (h *AuthHandler) completePasswordLogin(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		return err
 	}
-	setAuthCookie(w, ssoSessionCookie, rawToken, h.sessionTTL())
+	setAuthCookie(w, ssoSessionCookie, rawToken, h.sessionTTL(), h.SecureCookies)
 	sessionID := session.ID
 	h.audit(r, "LoginSucceeded", "success", &userID, nil, &sessionID, nil)
 	if intent != "" {
@@ -964,7 +965,7 @@ func (h *AuthHandler) UserInfo(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie(ssoSessionCookie)
 	if err != nil || cookie.Value == "" {
-		clearAuthCookie(w, ssoSessionCookie)
+		clearAuthCookie(w, ssoSessionCookie, h.SecureCookies)
 		h.audit(r, "Logout", "success", nil, nil, nil, nil)
 		_ = writeJSON(w, http.StatusOK, map[string]any{"logged_out": true})
 		return
@@ -976,7 +977,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	session, err := h.sessionLookup().FindActiveByTokenHash(r.Context(), idgen.HashToken(cookie.Value))
 	if err != nil {
 		if errors.Is(err, repository.ErrSessionNotFound) {
-			clearAuthCookie(w, ssoSessionCookie)
+			clearAuthCookie(w, ssoSessionCookie, h.SecureCookies)
 			h.audit(r, "Logout", "success", nil, nil, nil, nil)
 			_ = writeJSON(w, http.StatusOK, map[string]any{"logged_out": true})
 			return
@@ -986,7 +987,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if session == nil {
-		clearAuthCookie(w, ssoSessionCookie)
+		clearAuthCookie(w, ssoSessionCookie, h.SecureCookies)
 		h.audit(r, "Logout", "success", nil, nil, nil, nil)
 		_ = writeJSON(w, http.StatusOK, map[string]any{"logged_out": true})
 		return
@@ -996,7 +997,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, sharederrors.CodeInternal, "logout unavailable")
 		return
 	}
-	clearAuthCookie(w, ssoSessionCookie)
+	clearAuthCookie(w, ssoSessionCookie, h.SecureCookies)
 	h.audit(r, "Logout", "success", &session.UserID, nil, &session.ID, nil)
 	_ = writeJSON(w, http.StatusOK, map[string]any{"logged_out": true})
 }

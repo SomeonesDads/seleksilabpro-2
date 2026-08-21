@@ -20,26 +20,26 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, code, messag
 	sharederrors.Write(w, status, code, message, requestID)
 }
 
-func setAuthCookie(w http.ResponseWriter, name, value string, ttl time.Duration) {
+func setAuthCookie(w http.ResponseWriter, name, value string, ttl time.Duration, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(ttl.Seconds()),
 		Expires:  time.Now().Add(ttl),
 	})
 }
 
-func clearAuthCookie(w http.ResponseWriter, name string) {
+func clearAuthCookie(w http.ResponseWriter, name string, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 		Expires:  time.Unix(1, 0),

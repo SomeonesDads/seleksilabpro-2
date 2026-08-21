@@ -94,6 +94,7 @@ func main() {
 		JWTSigningKey:    []byte(cfg.JWTSigningKey),
 		TokenStrategy:    cfg.TokenStrategy,
 		MFAEncryptionKey: cfg.MFAEncryptionKey,
+		SecureCookies:    &cfg.SecureCookies,
 	}, logger)
 	authH.VerifyMFA = mfa.NewTOTPVerifier(totpRepo, cfg.MFAEncryptionKey).Verify
 	adminH := handlers.NewAdminHandler(handlers.AdminRepositories{

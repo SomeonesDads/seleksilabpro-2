@@ -154,6 +154,7 @@ type AuthHandlerConfig struct {
 	JWTSigningKey    []byte
 	TokenStrategy    string
 	MFAEncryptionKey []byte
+	SecureCookies    *bool
 }
 
 const (
@@ -179,6 +180,10 @@ func (c AuthHandlerConfig) withDefaults() AuthHandlerConfig {
 	}
 	if c.TokenStrategy == "" {
 		c.TokenStrategy = defaultTokenStrategy
+	}
+	if c.SecureCookies == nil {
+		secure := true
+		c.SecureCookies = &secure
 	}
 	c.JWTSigningKey = append([]byte(nil), c.JWTSigningKey...)
 	return c
@@ -216,6 +221,7 @@ func NewAuthHandlerWithDependencies(repos AuthRepositories, cfg AuthHandlerConfi
 		JWTSigningKey:      cfg.JWTSigningKey,
 		TokenStrategy:      cfg.TokenStrategy,
 		MFAEncryptionKey:   append([]byte(nil), cfg.MFAEncryptionKey...),
+		SecureCookies:      *cfg.SecureCookies,
 		Metrics:            metrics.New(nil),
 	}
 }

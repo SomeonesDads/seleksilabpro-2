@@ -28,11 +28,20 @@ func TestAuthHandlerConfigWithDefaultsCopiesSigningKey(t *testing.T) {
 	if string(cfg.JWTSigningKey) != "signing-key" {
 		t.Fatalf("signing key was not copied")
 	}
+	if cfg.SecureCookies == nil || !*cfg.SecureCookies {
+		t.Fatalf("secure-cookie default missing: %+v", cfg)
+	}
+
+	insecure := false
+	explicit := (AuthHandlerConfig{SecureCookies: &insecure}).withDefaults()
+	if explicit.SecureCookies == nil || *explicit.SecureCookies {
+		t.Fatalf("explicit insecure-cookie setting was overridden: %+v", explicit)
+	}
 }
 
 func TestSetAuthCookieUsesRequiredSecurityAttributes(t *testing.T) {
 	response := httptest.NewRecorder()
-	setAuthCookie(response, "sso_session", "raw-token", time.Hour)
+	setAuthCookie(response, "sso_session", "raw-token", time.Hour, true)
 
 	cookie := response.Result().Cookies()[0]
 	if cookie.Value != "raw-token" {

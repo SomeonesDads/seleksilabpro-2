@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -38,6 +39,10 @@ type Config struct {
 
 	// Graceful shutdown timeout (B04 bonus, but harmless to wire up now).
 	ShutdownTimeout time.Duration
+
+	// SecureCookies controls the Secure attribute on session cookies.
+	// Set false only when the server is served over plain HTTP.
+	SecureCookies bool
 }
 
 func Load() (*Config, error) {
@@ -52,6 +57,7 @@ func Load() (*Config, error) {
 		AccessTokenTTL:  durEnv("ACCESS_TOKEN_TTL", 15*time.Minute),
 		SSOSessionTTL:   durEnv("SSO_SESSION_TTL", 12*time.Hour),
 		ShutdownTimeout: durEnv("SHUTDOWN_TIMEOUT", 10*time.Second),
+		SecureCookies:   boolEnv("SECURE_COOKIES", true),
 	}
 	keyText := os.Getenv("MFA_ENCRYPTION_KEY")
 	if keyText == "" {
@@ -93,4 +99,16 @@ func durEnv(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+func boolEnv(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return b
 }
