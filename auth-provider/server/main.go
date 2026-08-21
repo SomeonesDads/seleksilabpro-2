@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -41,7 +42,6 @@ func main() {
 		logger.Error("db connect failed", slog.Any("err", err))
 		os.Exit(1)
 	}
-	defer pool.Close()
 
 	if err := appdb.RunMigrations(ctx, cfg.DatabaseURL, "migrations"); err != nil {
 		logger.Error("migrations failed", slog.Any("err", err))
@@ -59,7 +59,6 @@ func main() {
 		logger.Error("gorm sql db failed", slog.Any("err", err))
 		os.Exit(1)
 	}
-	defer sqlDB.Close()
 
 	userRepo := repository.NewUserRepository(gormDB)
 	mfaRepo := repository.NewMFARepository(gormDB)
@@ -88,12 +87,12 @@ func main() {
 		AccessTokens:      accessTokenRepo,
 		Groups:            groupRepo,
 	}, handlers.AuthHandlerConfig{
-		AuthCodeTTL:    cfg.AuthCodeTTL,
-		AccessTokenTTL: cfg.AccessTokenTTL,
-		SessionTTL:     cfg.SSOSessionTTL,
-		JWTIssuer:      cfg.JWTIssuer,
-		JWTSigningKey:  []byte(cfg.JWTSigningKey),
-		TokenStrategy:  cfg.TokenStrategy,
+		AuthCodeTTL:      cfg.AuthCodeTTL,
+		AccessTokenTTL:   cfg.AccessTokenTTL,
+		SessionTTL:       cfg.SSOSessionTTL,
+		JWTIssuer:        cfg.JWTIssuer,
+		JWTSigningKey:    []byte(cfg.JWTSigningKey),
+		TokenStrategy:    cfg.TokenStrategy,
 		MFAEncryptionKey: cfg.MFAEncryptionKey,
 	}, logger)
 	authH.VerifyMFA = mfa.NewTOTPVerifier(totpRepo, cfg.MFAEncryptionKey).Verify
@@ -116,7 +115,11 @@ func main() {
 	// then periodically so the metrics endpoint reflects real runtime state
 	// immediately rather than only after the first tick.
 	updateRuntimeMetrics(ctx, logger, gormDB, pool, metricsInstance)
-	go refreshRuntimeMetrics(ctx, logger, gormDB, pool, metricsInstance)
+	runtimeMetricsDone := make(chan struct{})
+	go func() {
+		defer close(runtimeMetricsDone)
+		refreshRuntimeMetrics(ctx, logger, gormDB, pool, metricsInstance)
+	}()
 
 	mux := http.NewServeMux()
 
@@ -164,30 +167,134 @@ func main() {
 	handler = middleware.RequestLogger(logger)(handler)
 	handler = logging.WithRequestID(handler)
 
-	srv := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: handler,
+	gs := newGracefulServer(":"+cfg.Port, handler)
+	gs.metricsDone = runtimeMetricsDone
+	gs.run(logger)
+	drained, err := gs.shutdown(ctx, cfg.ShutdownTimeout, logger)
+	if err != nil {
+		logger.Error("graceful drain failed", slog.Any("err", err))
 	}
 
+	// The server runs no broker consumer or publisher of its own: the
+	// transactional-outbox publisher and event consumer live in the
+	// sync-worker process (DECISIONS 017/020). After every in-flight request
+	// has finished (or been cancelled and joined) we close the database
+	// connections. If a handler ignored cancellation past the deadline we do
+	// NOT close the pool underneath it; we let the process exit and the OS
+	// reclaim the connections instead.
+	if drained {
+		if err := sqlDB.Close(); err != nil {
+			logger.Error("gorm db close failed", slog.Any("err", err))
+		}
+		pool.Close()
+		logger.Info("shutdown complete")
+	} else {
+		logger.Error("shutdown incomplete: database connections left open for the OS to reclaim")
+	}
+}
+
+// gracefulServer wraps http.Server with in-flight request tracking and a
+// cancelable base context. http.Server.Shutdown stops accepting new
+// connections but does NOT cancel active request contexts, so after the drain
+// timeout handlers can still be running against the database. gracefulServer
+// forces those requests to cancel (via the base context) and waits for them to
+// return before the caller tears down shared resources such as the connection
+// pool.
+type gracefulServer struct {
+	srv         *http.Server
+	wg          sync.WaitGroup
+	baseCtx     context.Context
+	cancel      context.CancelFunc
+	metricsDone <-chan struct{}
+}
+
+func newGracefulServer(addr string, handler http.Handler) *gracefulServer {
+	baseCtx, cancel := context.WithCancel(context.Background())
+	gs := &gracefulServer{baseCtx: baseCtx, cancel: cancel}
+	gs.srv = &http.Server{
+		Addr: addr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gs.wg.Add(1)
+			defer gs.wg.Done()
+			ctx, c := context.WithCancel(baseCtx)
+			defer c()
+			handler.ServeHTTP(w, r.WithContext(ctx))
+		}),
+	}
+	return gs
+}
+
+func (gs *gracefulServer) run(logger *slog.Logger) {
 	go func() {
-		logger.Info("listening", slog.String("addr", srv.Addr))
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Info("listening", slog.String("addr", gs.srv.Addr))
+		if err := gs.srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("server error", slog.Any("err", err))
 			os.Exit(1)
 		}
 	}()
+}
 
-	<-ctx.Done()
+// shutdown blocks until a shutdown signal, then drains in-flight requests
+// within a hard wall-clock deadline (signal time + shutdownTimeout). A small
+// finalization reserve is carved inside that deadline: the graceful drain gets
+// the remaining time, then the base context is cancelled and handlers are
+// joined within the reserve. It returns whether all handlers finished; if a
+// handler ignores cancellation past the deadline the caller must NOT close the
+// database underneath it.
+func (gs *gracefulServer) shutdown(signalCtx context.Context, shutdownTimeout time.Duration, logger *slog.Logger) (bool, error) {
+	<-signalCtx.Done()
 	logger.Info("shutdown signal received, draining in-flight requests")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	// Hard deadline for the whole shutdown.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("graceful shutdown failed", slog.Any("err", err))
+
+	// Reserve a small finalization window; the graceful drain uses the rest.
+	reserve := finalizationReserve(shutdownTimeout)
+	drainDeadline := time.Now().Add(shutdownTimeout - reserve)
+	drainCtx, drainCancel := context.WithDeadline(shutdownCtx, drainDeadline)
+	err := gs.srv.Shutdown(drainCtx)
+	drainCancel()
+	if err != nil {
+		logger.Error("graceful drain timed out, forcing in-flight requests to cancel", slog.Any("err", err))
 	}
-	// TODO [B04]: also stop consuming from the broker here and close the
-	// AMQP connection cleanly before the process exits.
-	logger.Info("shutdown complete")
+
+	// Cancel any request still running so its database work stops before the
+	// connection pool is closed.
+	gs.cancel()
+
+	// Join the now-cancelled handlers inside the finalization reserve (the
+	// remaining hard deadline); a handler mid-DB-call is not raced by teardown.
+	done := make(chan struct{})
+	go func() {
+		gs.wg.Wait()
+		if gs.metricsDone != nil {
+			<-gs.metricsDone
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+		logger.Info("all in-flight requests finished")
+		return true, err
+	case <-shutdownCtx.Done():
+		logger.Error("forced in-flight wait exceeded budget; skipping DB close to avoid racing in-flight requests")
+		return false, err
+	}
+}
+
+// finalizationReserve returns the small slice of the shutdown budget reserved
+// for joining cancelled handlers, capped so it stays a small finalization
+// window rather than eating the graceful-drain time.
+func finalizationReserve(timeout time.Duration) time.Duration {
+	r := timeout / 4
+	if r > 2*time.Second {
+		r = 2 * time.Second
+	}
+	if r <= 0 {
+		r = timeout
+	}
+	return r
 }
 
 // refreshRuntimeMetrics periodically updates the database-health and
