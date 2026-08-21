@@ -3,10 +3,8 @@
 // against the same database never duplicates users, groups, applications,
 // redirect URIs, or policies.
 //
-// Credentials and internal auth tokens are demo placeholders. They default to
-// the values committed in the service .env.example files so `docker compose`
-// works without manual edits; operators may override any of them through the
-// environment and must treat the printed output as the provisioning secret.
+// Credentials and internal auth tokens must be supplied through the environment
+// and are printed only as intended provisioning output.
 package seed
 
 import (
@@ -30,8 +28,8 @@ var (
 	AppBID = uuid.MustParse("00000000-0000-0000-0000-0000000000b2")
 )
 
-// Config carries the demo identities. All fields have safe defaults; any empty
-// field falls back to its default so a zero-value Config is usable.
+// Config carries demo identities and application provisioning values. Secret
+// fields are loaded by LoadConfig and are never given source-level defaults.
 type Config struct {
 	AdminEmail, AdminPassword, AdminName string
 	DemoEmail, DemoPassword, DemoName    string
@@ -40,38 +38,58 @@ type Config struct {
 	AppBClientID, AppBSecret, AppBRedirect, AppBLogout, AppBBase, InternalTokenB string
 }
 
-func env(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
+const (
+	seedAdminPasswordEnv  = "SEED_ADMIN_PASSWORD"
+	seedDemoPasswordEnv   = "SEED_DEMO_PASSWORD"
+	seedAppASecretEnv     = "SEED_APP_A_CLIENT_SECRET"
+	seedAppBSecretEnv     = "SEED_APP_B_CLIENT_SECRET"
+	seedInternalTokenAEnv = "SEED_APP_A_INTERNAL_AUTH_TOKEN"
+	seedInternalTokenBEnv = "SEED_APP_B_INTERNAL_AUTH_TOKEN"
+)
 
-// DefaultConfig returns demo credentials consistent with the committed
-// .env.example files for the worker and the relying applications.
-func DefaultConfig() Config {
-	return Config{
+// LoadConfig returns demo metadata plus secrets supplied by the operator.
+// Missing values are reported by name only; secret contents never enter errors.
+func LoadConfig() (Config, error) {
+	cfg := Config{
 		AdminEmail:    "admin@example.com",
-		AdminPassword: "AdminPassword123!",
+		AdminPassword: os.Getenv(seedAdminPasswordEnv),
 		AdminName:     "Admin",
 		DemoEmail:     "demo@example.com",
-		DemoPassword:  "DemoPassword123!",
+		DemoPassword:  os.Getenv(seedDemoPasswordEnv),
 		DemoName:      "Demo User",
 
 		AppAClientID:   "app-a-client",
-		AppASecret:     "change-me-app-a-secret",
+		AppASecret:     os.Getenv(seedAppASecretEnv),
 		AppARedirect:   "http://app-a:5010/auth/callback",
 		AppALogout:     "http://app-a:5010/internal/logout",
 		AppABase:       "http://app-a:5010",
-		InternalTokenA: "change-me-internal-app-a",
+		InternalTokenA: os.Getenv(seedInternalTokenAEnv),
 
 		AppBClientID:   "app-b-client",
-		AppBSecret:     "change-me-app-b-secret",
+		AppBSecret:     os.Getenv(seedAppBSecretEnv),
 		AppBRedirect:   "http://app-b:5020/auth/callback",
 		AppBLogout:     "http://app-b:5020/internal/logout",
 		AppBBase:       "http://app-b:5020",
-		InternalTokenB: "change-me-internal-app-b",
+		InternalTokenB: os.Getenv(seedInternalTokenBEnv),
 	}
+
+	missing := make([]string, 0, 6)
+	for _, key := range []string{
+		seedAdminPasswordEnv,
+		seedDemoPasswordEnv,
+		seedAppASecretEnv,
+		seedAppBSecretEnv,
+		seedInternalTokenAEnv,
+		seedInternalTokenBEnv,
+	} {
+		if strings.TrimSpace(os.Getenv(key)) == "" {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) > 0 {
+		return Config{}, fmt.Errorf("seed: required environment variables are missing: %s", strings.Join(missing, ", "))
+	}
+	return cfg, nil
 }
 
 // Summary reports what the seed provisioned so the operator can wire the

@@ -89,7 +89,12 @@ func TestSeedIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer func() { sqlDB, e := db.DB(); if e == nil { _ = sqlDB.Close() } }()
+	defer func() {
+		sqlDB, e := db.DB()
+		if e == nil {
+			_ = sqlDB.Close()
+		}
+	}()
 
 	const reset = `TRUNCATE TABLE
 		event_deliveries, events, audit_logs, access_tokens, authorization_codes,
@@ -101,7 +106,7 @@ func TestSeedIsIdempotent(t *testing.T) {
 		t.Fatalf("reset: %v", err)
 	}
 
-	cfg := DefaultConfig()
+	cfg := testConfig()
 	if _, err := cfg.Seed(ctx, db); err != nil {
 		t.Fatalf("first seed: %v", err)
 	}
@@ -134,5 +139,73 @@ func TestSeedIsIdempotent(t *testing.T) {
 	}
 	if redirects != 2 {
 		t.Fatalf("redirect URIs = %d, want 2", redirects)
+	}
+}
+
+func testConfig() Config {
+	return Config{
+		AdminEmail:    "admin@example.com",
+		AdminPassword: uuid.NewString(),
+		AdminName:     "Admin",
+		DemoEmail:     "demo@example.com",
+		DemoPassword:  uuid.NewString(),
+		DemoName:      "Demo User",
+
+		AppAClientID:   "app-a-client",
+		AppASecret:     uuid.NewString(),
+		AppARedirect:   "http://app-a:5010/auth/callback",
+		AppALogout:     "http://app-a:5010/internal/logout",
+		AppABase:       "http://app-a:5010",
+		InternalTokenA: uuid.NewString(),
+
+		AppBClientID:   "app-b-client",
+		AppBSecret:     uuid.NewString(),
+		AppBRedirect:   "http://app-b:5020/auth/callback",
+		AppBLogout:     "http://app-b:5020/internal/logout",
+		AppBBase:       "http://app-b:5020",
+		InternalTokenB: uuid.NewString(),
+	}
+}
+
+func TestLoadConfigRequiresSecrets(t *testing.T) {
+	for _, key := range []string{
+		seedAdminPasswordEnv,
+		seedDemoPasswordEnv,
+		seedAppASecretEnv,
+		seedAppBSecretEnv,
+		seedInternalTokenAEnv,
+		seedInternalTokenBEnv,
+	} {
+		t.Setenv(key, "")
+	}
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig accepted missing seed secrets")
+	}
+}
+
+func TestLoadConfigReadsSecrets(t *testing.T) {
+	values := map[string]string{
+		seedAdminPasswordEnv:  uuid.NewString(),
+		seedDemoPasswordEnv:   uuid.NewString(),
+		seedAppASecretEnv:     uuid.NewString(),
+		seedAppBSecretEnv:     uuid.NewString(),
+		seedInternalTokenAEnv: uuid.NewString(),
+		seedInternalTokenBEnv: uuid.NewString(),
+	}
+	for key, value := range values {
+		t.Setenv(key, value)
+	}
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AdminPassword != values[seedAdminPasswordEnv] ||
+		cfg.DemoPassword != values[seedDemoPasswordEnv] ||
+		cfg.AppASecret != values[seedAppASecretEnv] ||
+		cfg.AppBSecret != values[seedAppBSecretEnv] ||
+		cfg.InternalTokenA != values[seedInternalTokenAEnv] ||
+		cfg.InternalTokenB != values[seedInternalTokenBEnv] {
+		t.Fatal("LoadConfig did not copy configured seed secrets")
 	}
 }

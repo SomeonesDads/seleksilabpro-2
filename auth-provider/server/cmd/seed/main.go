@@ -18,6 +18,11 @@ import (
 func main() {
 	ctx := context.Background()
 
+	cfg, err := seed.LoadConfig()
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		log.Fatal("DATABASE_URL is required")
@@ -37,7 +42,7 @@ func main() {
 	}
 	defer sqlDB.Close()
 
-	summary, err := seed.DefaultConfig().Seed(ctx, gormDB)
+	summary, err := cfg.Seed(ctx, gormDB)
 	if err != nil {
 		log.Fatalf("seed: %v", err)
 	}
