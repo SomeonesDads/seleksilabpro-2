@@ -60,16 +60,16 @@ func LoadConfig() (Config, error) {
 
 		AppAClientID:   "app-a-client",
 		AppASecret:     os.Getenv(seedAppASecretEnv),
-		AppARedirect:   "http://app-a:5010/auth/callback",
+		AppARedirect:   "http://localhost:5010/auth/callback",
 		AppALogout:     "http://app-a:5010/internal/logout",
-		AppABase:       "http://app-a:5010",
+		AppABase:       "http://localhost:5010",
 		InternalTokenA: os.Getenv(seedInternalTokenAEnv),
 
 		AppBClientID:   "app-b-client",
 		AppBSecret:     os.Getenv(seedAppBSecretEnv),
-		AppBRedirect:   "http://app-b:5020/auth/callback",
+		AppBRedirect:   "http://localhost:5020/auth/callback",
 		AppBLogout:     "http://app-b:5020/internal/logout",
-		AppBBase:       "http://app-b:5020",
+		AppBBase:       "http://localhost:5020",
 		InternalTokenB: os.Getenv(seedInternalTokenBEnv),
 	}
 

@@ -157,26 +157,11 @@ APP_TARGETS_JSON=[{"name":"App A","applicationId":"00000000-0000-0000-0000-00000
 Ganti `APP_A_INTERNAL_TOKEN` dan `APP_B_INTERNAL_TOKEN` dengan secret asli.
 Jangan menambahkan whitespace atau secret lain ke repository.
 
-### 3. Tambahkan hostname Compose untuk browser
+### 3. Gunakan URL browser Compose
 
-Default redirect URI dan URL OAuth memakai hostname service Docker `auth-server`,
-`app-a`, dan `app-b`. Browser host perlu resolve hostname tersebut.
-
-Edit file hosts , shortcut buat windows:
-
-```powershell
-Start-Process notepad "$env:WINDIR\System32\drivers\etc\hosts" -Verb RunAs
-```
-
-Tambahkan baris:
-
-```text
-127.0.0.1 auth-server
-127.0.0.1 app-a
-127.0.0.1 app-b
-```
-
-Kalau tidak nanti setiap redirect pasti error dan karena gak akan jumpa app-a/auth/callback misal.
+File environment contoh memakai `localhost` untuk URL yang dibuka browser dan
+hostname Docker (`auth-server`, `app-a`, `app-b`) hanya untuk komunikasi internal.
+Tidak perlu mengubah file hosts.
 
 ## Untuk step 4-5 ada shortcut `powershell python startup.py --up` (cuman di windows)
 
@@ -223,8 +208,8 @@ Seed boleh dijalankan ulang tanpa membuat duplicate data.
 1. Buka Control Panel: `http://localhost:5002/login`.
 2. Login sebagai `admin@example.com` untuk mengelola user, group, aplikasi, dan
    policy.
-3. Buka App A: `http://app-a:5010`.
-4. Buka App B: `http://app-b:5020`.
+3. Buka App A: `http://localhost:5010`.
+4. Buka App B: `http://localhost:5020`.
 5. Login sebagai `demo@example.com` menggunakan password seed.
 6. App A dan App B membuat local session yang berbeda, tetapi menggunakan
    central session Auth Provider yang sama.
@@ -235,8 +220,8 @@ Seed boleh dijalankan ulang tanpa membuat duplicate data.
 | --------------------- | ----------------------------------------------------------------------------------------------------------- |
 | Auth Provider Server  | `http://localhost:5001`                                                                                     |
 | Control Panel         | `http://localhost:5002`                                                                                     |
-| App A                 | `http://app-a:5010`                                                                                         |
-| App B                 | `http://app-b:5020`                                                                                         |
+| App A                 | `http://localhost:5010`                                                                                     |
+| App B                 | `http://localhost:5020`                                                                                     |
 | Auth Provider metrics | `http://localhost:5001/metrics`                                                                             |
 | Sync Worker metrics   | `http://sync-worker:9091/metrics` dari network Compose; port tidak dipublish ke host (inaccessible harusny) |
 | RabbitMQ management   | `http://localhost:15672`                                                                                    |
