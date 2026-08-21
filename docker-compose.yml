@@ -89,6 +89,9 @@ services:
       context: .
       dockerfile: auth-provider/server/Dockerfile
     restart: unless-stopped
+    # Grace period above the configured SHUTDOWN_TIMEOUT so Docker sends
+    # SIGKILL only after the graceful drain has had time to finish.
+    stop_grace_period: 30s
     env_file:
       - auth-provider/server/.env
     ports:
@@ -104,6 +107,7 @@ services:
       context: .
       dockerfile: auth-provider/control-panel/Dockerfile
     restart: unless-stopped
+    stop_grace_period: 30s
     env_file:
       - auth-provider/control-panel/.env
     ports:
@@ -116,6 +120,7 @@ services:
       context: .
       dockerfile: auth-provider/sync-worker/Dockerfile
     restart: unless-stopped
+    stop_grace_period: 30s
     env_file:
       - auth-provider/sync-worker/.env
     depends_on:
@@ -129,6 +134,7 @@ services:
       context: .
       dockerfile: applications/app-a/Dockerfile
     restart: unless-stopped
+    stop_grace_period: 30s
     env_file:
       - applications/app-a/.env
     ports:
@@ -144,6 +150,7 @@ services:
       context: .
       dockerfile: applications/app-b/Dockerfile
     restart: unless-stopped
+    stop_grace_period: 30s
     env_file:
       - applications/app-b/.env
     ports:
