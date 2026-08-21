@@ -62,7 +62,78 @@ Setiap token memiliki format claims berikut:
 
 ## Cara menjalankan sistem
 
-Dokumentasi langkah `docker compose up`, migration, seed, dan URL tiap komponen.
+Compose reads service `.env` files, not `.env.example` files. Copy examples
+before starting; the copied files are gitignored.
+
+PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+Copy-Item auth-provider/server/.env.example auth-provider/server/.env
+Copy-Item auth-provider/control-panel/.env.example auth-provider/control-panel/.env
+Copy-Item auth-provider/sync-worker/.env.example auth-provider/sync-worker/.env
+Copy-Item applications/app-a/.env.example applications/app-a/.env
+Copy-Item applications/app-b/.env.example applications/app-b/.env
+```
+
+POSIX shell:
+
+```sh
+cp .env.example .env
+cp auth-provider/server/.env.example auth-provider/server/.env
+cp auth-provider/control-panel/.env.example auth-provider/control-panel/.env
+cp auth-provider/sync-worker/.env.example auth-provider/sync-worker/.env
+cp applications/app-a/.env.example applications/app-a/.env
+cp applications/app-b/.env.example applications/app-b/.env
+```
+
+Set `JWT_SIGNING_KEY` and `MFA_ENCRYPTION_KEY` in the server file. Generate
+both with `openssl rand -base64 32`; the MFA value must decode to 32 bytes.
+Set non-empty App A and App B client secrets and internal auth tokens in both
+the application files and the matching `SEED_*` variables in the server file.
+Set `APP_TARGETS_JSON` in the worker file with the fixed application IDs from
+the example and the same internal tokens.
+
+Start the stack:
+
+```sh
+docker compose up --build
+```
+
+Seed after PostgreSQL is ready. Run from `auth-provider/server` with the six
+`SEED_*` variables exported and `DATABASE_URL` pointed at host port `5433`:
+
+```sh
+go run ./cmd/seed
+```
+
+The seed command is idempotent. It prints provisioning credentials once; the
+database stores only password and client-secret hashes.
+
+Component URLs:
+
+| Component | URL |
+|---|---|
+| Auth Provider | http://localhost:5001 |
+| Control Panel | http://localhost:5002 |
+| App A | http://localhost:5010 |
+| App B | http://localhost:5020 |
+| RabbitMQ management | http://localhost:15672 |
+
+Verification commands:
+
+```sh
+docker compose config
+```
+
+Run the following from each module directory (`shared`, `auth-provider/server`,
+`auth-provider/control-panel`, `auth-provider/sync-worker`, `applications/app-a`,
+and `applications/app-b`):
+
+```sh
+go test ./...
+go vet ./...
+```
 
 ## Arsitektur dan alur
 
