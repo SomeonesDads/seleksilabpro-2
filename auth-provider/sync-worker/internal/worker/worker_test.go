@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -162,6 +163,61 @@ func TestHandleDeliveryRetriesIndependentlyAndDeadLettersPermanentFailure(t *tes
 	}
 	if store.states[deliveryKey(payload.EventID, appAID)].Status != "failed" || store.states[deliveryKey(payload.EventID, appBID)].Status != "succeeded" {
 		t.Fatalf("delivery states = %+v", store.states)
+	}
+}
+
+// TestHandleDeliveryInterruptedIsNotFalselyAcked proves the B04 acceptance
+// criterion: an interrupted delivery is not falsely marked successful and is
+// redelivered (NACK with requeue), never ACKed, when shutdown cancels the work
+// context mid-delivery.
+func TestHandleDeliveryInterruptedIsNotFalselyAcked(t *testing.T) {
+	// A raw listener that accepts the worker's POST but never responds,
+	// simulating an unresponsive relying application during shutdown. It
+	// releases the accepted connection only once the work context is
+	// cancelled, mirroring a delivery cut short by graceful shutdown.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		for {
+			conn, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(c net.Conn) {
+				<-ctx.Done()
+				_ = c.Close()
+			}(conn)
+		}
+	}()
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	appAID := uuid.New()
+	payload := payloadFor(&appAID)
+	store := newFakeDeliveryStore()
+	ack := &fakeAcknowledger{}
+	w := New(nil, store, nil, []AppTarget{
+		{ApplicationID: appAID, LogoutNotifyURL: "http://" + ln.Addr().String() + "/", InternalAuthToken: "secret"},
+	}, 5, 0, 0)
+
+	w.HandleDelivery(ctx, deliveryFor(ack, payload))
+
+	if ack.acks != 0 {
+		t.Fatalf("interrupted delivery must not be acked, acks=%d", ack.acks)
+	}
+	if len(ack.nacks) != 1 || !ack.nacks[0] {
+		t.Fatalf("interrupted delivery must be nacked for redelivery, nacks=%v", ack.nacks)
+	}
+	if state := store.states[deliveryKey(payload.EventID, appAID)]; state.Status == "succeeded" {
+		t.Fatalf("interrupted delivery must not be marked succeeded: %+v", state)
 	}
 }
 

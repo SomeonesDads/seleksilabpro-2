@@ -316,3 +316,172 @@ func TestUnknownEventTypeNotRoutedToBroker(t *testing.T) {
 		t.Fatalf("unknown event should remain pending: unpublished=%d err=%v", len(unpublished), err)
 	}
 }
+
+// TestConsumerCancellationRedeliversUnacked proves the B04 acceptance
+// criterion that stopping broker consumption leaves an unacknowledged message
+// available for redelivery: a consumed-but-unacked delivery is requeued when
+// the consumer is cancelled and is redelivered to a fresh connection.
+func TestConsumerCancellationRedeliversUnacked(t *testing.T) {
+	if testAMQPURL == "" {
+		t.Skip("RabbitMQ is not available (set TEST_AMQP_URL or run docker)")
+	}
+	ctx := context.Background()
+	conn, err := queue.Connect(testAMQPURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetConsumerPrefetch(); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Publish(ctx, "SessionRevoked", []byte(`{"eventId":"`+uuid.NewString()+`"}`)); err != nil {
+		t.Fatal(err)
+	}
+	deliveries, err := conn.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-deliveries:
+		// Received but intentionally NOT acked.
+	case <-time.After(5 * time.Second):
+		t.Fatal("message was not delivered to the consumer")
+	}
+	// Stop consuming and close the connection without acknowledging.
+	if err := conn.StopConsuming(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	_ = conn.Close()
+
+	// A fresh connection must receive the unacked message again.
+	conn2, err := queue.Connect(testAMQPURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn2.Close()
+	if err := conn2.SetConsumerPrefetch(); err != nil {
+		t.Fatal(err)
+	}
+	deliveries2, err := conn2.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case d := <-deliveries2:
+		_ = d.Ack(false)
+	case <-time.After(5 * time.Second):
+		t.Fatal("unacked message was not redelivered after consumer cancellation")
+	}
+}
+
+// TestPublisherStopsOnContextCancel proves the B04 acceptance criterion that
+// the outbox publisher stops polling and exits when its loop context is
+// cancelled (shutdown signal). The in-flight batch uses an independent context,
+// so it completes rather than being abandoned mid-publish.
+func TestPublisherStopsOnContextCancel(t *testing.T) {
+	if testAMQPURL == "" {
+		t.Skip("RabbitMQ is not available (set TEST_AMQP_URL or run docker)")
+	}
+	conn, err := queue.Connect(testAMQPURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	publisher := queue.NewOutboxPublisher(conn, &emptyOutboxStore{}, nil, 50*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	drainCh := make(chan context.Context, 1)
+	drainCh <- ctx
+	done := make(chan struct{})
+	go func() {
+		publisher.Run(ctx, ctx, drainCh)
+		close(done)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("publisher did not return after context cancel")
+	}
+}
+
+// TestPublisherCompletesInFlightBatchAfterCancel proves the P1 fix that an
+// event being published when shutdown is signalled still completes and is
+// marked published (so it is never left unpublished and replayed after
+// restart). The event is inserted AFTER the loop context is cancelled, so it is
+// only ever picked up by the post-cancel final drain running under the armed
+// shutdown-deadline context.
+func TestPublisherCompletesInFlightBatchAfterCancel(t *testing.T) {
+	st, pool, cleanup := setupBrokerStore(t)
+	defer cleanup()
+
+	conn, err := queue.Connect(testAMQPURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	deliveries, err := conn.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Armed shutdown-deadline context handed to the publisher's final drain.
+	// Cancelling the loop context mid-run must not abandon an in-flight
+	// publish: the final drain keeps running under this context and completes
+	// the publish + mark.
+	drainCh := make(chan context.Context, 1)
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer drainCancel()
+	drainCh <- drainCtx
+
+	publisher := queue.NewOutboxPublisher(conn, st, nil, 20*time.Millisecond)
+	loopCtx, cancel := context.WithCancel(context.Background())
+	go func() {
+		publisher.Run(loopCtx, context.Background(), drainCh)
+	}()
+
+	// Let the publisher start, then signal shutdown.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	// Insert the event only after shutdown was signalled, so it is processed
+	// exclusively by the post-cancel final drain.
+	ctx := context.Background()
+	eventID := uuid.New()
+	userID := uuid.New()
+	if err := insertEvent(ctx, pool, eventID, userID, "SessionRevoked"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The event must reach the broker and be marked published.
+	select {
+	case d := <-deliveries:
+		_ = d.Ack(false)
+	case <-time.After(5 * time.Second):
+		t.Fatal("event was not published to the broker after shutdown signal")
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	unpublished, err := st.ListUnpublished(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unpublished) != 0 {
+		t.Fatalf("event was left unpublished after shutdown: %d unpublished", len(unpublished))
+	}
+}
+
+// emptyOutboxStore never returns work, so the publisher's Run loop spins on its
+// poll interval until the loop context is cancelled.
+type emptyOutboxStore struct{}
+
+func (emptyOutboxStore) ListUnpublished(_ context.Context, _ int) ([]queue.OutboxEvent, error) {
+	return nil, nil
+}
+
+func (emptyOutboxStore) MarkPublished(_ context.Context, _ string, _ time.Time) error {
+	return nil
+}
