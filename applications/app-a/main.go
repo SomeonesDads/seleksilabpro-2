@@ -49,7 +49,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	provider := auth.NewClient(cfg.AuthProviderBaseURL, cfg.ClientID, cfg.ClientSecret)
+	provider := auth.NewClient(cfg.AuthProviderBaseURL, cfg.AuthProviderPublicURL, cfg.ClientID, cfg.ClientSecret)
 	app := handlers.NewApp(cfg, st, provider)
 
 	mux := http.NewServeMux()
@@ -79,6 +79,3 @@ func main() {
 func openDB(dsn string) (*gorm.DB, error) {
 	return db.Open(dsn, nil)
 }
-
-
-

@@ -36,14 +36,16 @@ type Provider interface {
 
 type Client struct {
 	BaseURL      string
+	PublicURL    string
 	ClientID     string
 	ClientSecret string
 	HTTP         *http.Client
 }
 
-func NewClient(baseURL, clientID, clientSecret string) *Client {
+func NewClient(baseURL, publicURL, clientID, clientSecret string) *Client {
 	return &Client{
 		BaseURL:      strings.TrimRight(baseURL, "/"),
+		PublicURL:    strings.TrimRight(publicURL, "/"),
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
 		HTTP:         &http.Client{Timeout: 15 * time.Second},
@@ -58,7 +60,7 @@ func (c *Client) AuthorizeURL(state, codeChallenge, redirectURI string) string {
 	q.Set("state", state)
 	q.Set("code_challenge", codeChallenge)
 	q.Set("code_challenge_method", "S256")
-	return c.BaseURL + "/authorize?" + q.Encode()
+	return c.PublicURL + "/authorize?" + q.Encode()
 }
 
 func (c *Client) ExchangeCode(ctx context.Context, code, redirectURI, codeVerifier string) (string, error) {
