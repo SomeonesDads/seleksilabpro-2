@@ -202,6 +202,58 @@ Seed boleh dijalankan ulang tanpa membuat duplicate data.
 6. App A dan App B membuat local session yang berbeda, tetapi menggunakan
    central session Auth Provider yang sama.
 
+### Demo Retry dan DLQ
+
+Pastikan login App A dan App B selesai pada central session yang sama. Cek
+hubungan tokennya sebelum memicu revoke:
+
+```sql
+SELECT session_id, application_id
+FROM access_tokens
+WHERE user_id = '<DEMO_USER_ID>'
+ORDER BY created_at;
+```
+
+Hentikan App B tanpa membiarkan Compose menyalakannya kembali:
+
+```powershell
+docker compose kill app-b
+docker compose ps app-b
+```
+
+Pantau worker, lalu nonaktifkan user demo atau lakukan SSO logout dari Control
+Panel/Auth Provider:
+
+```powershell
+docker compose logs -f sync-worker
+```
+
+Dengan nilai default `MAX_RETRIES=5` dan `BASE_BACKOFF=2s`, log worker akan
+menampilkan attempt 1 sampai 5 dengan backoff 2s, 4s, 8s, dan 16s. Setelah
+attempt terakhir, event di-NACK tanpa requeue dan RabbitMQ memindahkannya ke
+`sync-worker.dlq`.
+
+Status delivery per aplikasi dapat diperiksa di primary database:
+
+```sql
+SELECT d.event_id, a.name, d.status, d.attempt_count,
+       d.next_retry_at, d.last_error
+FROM event_deliveries d
+JOIN applications a ON a.id = d.application_id
+WHERE d.event_id = '<EVENT_ID>'
+ORDER BY a.name;
+```
+
+Hasil yang diharapkan: App A `succeeded`, App B `failed` dengan
+`attempt_count=5`. DLQ adalah queue native RabbitMQ, bukan tabel SQL; cek
+jumlah pesannya dengan:
+
+```powershell
+docker compose exec rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged
+```
+
+Baris `sync-worker.dlq` menunjukkan event yang sudah dipindahkan ke DLQ.
+
 ## URL Komponen
 
 | Komponen              | URL atau alamat                                                                                             |
