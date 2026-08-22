@@ -11,11 +11,13 @@ COPY auth-provider/server/ auth-provider/server/
 
 WORKDIR /src/auth-provider/server
 RUN go build -o /out/server .
+RUN go build -o /out/seed ./cmd/seed
 
 FROM alpine:3.20
 RUN adduser -D -u 10001 appuser
 WORKDIR /app
 COPY --from=build /out/server ./server
+COPY --from=build /out/seed ./seed
 COPY --from=build /src/auth-provider/server/migrations ./migrations
 USER appuser
 

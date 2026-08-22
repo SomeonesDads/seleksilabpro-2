@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# One command should bring up the whole stack:
+# One command should bring up the whole stack, including idempotent demo seed:
 #   docker compose up --build
 #
 # Ports (adjust freely, just keep README in sync):
@@ -82,6 +82,18 @@ services:
       timeout: 5s
       retries: 10
 
+  seed:
+    build:
+      context: .
+      dockerfile: auth-provider/server/Dockerfile
+    restart: "no"
+    entrypoint: ["./seed"]
+    env_file:
+      - auth-provider/server/.env
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+
   auth-server:
     build:
       context: .
@@ -95,6 +107,8 @@ services:
     ports:
       - "5001:5001"
     depends_on:
+      seed:
+        condition: service_completed_successfully
       postgres-primary:
         condition: service_healthy
       rabbitmq:
@@ -122,6 +136,8 @@ services:
     env_file:
       - auth-provider/sync-worker/.env
     depends_on:
+      seed:
+        condition: service_completed_successfully
       postgres-primary:
         condition: service_healthy
       rabbitmq:

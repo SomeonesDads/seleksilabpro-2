@@ -96,7 +96,7 @@ sequenceDiagram
 ### Prasyarat
 
 - Docker Desktop dengan Docker Compose.
-- Go 1.25 untuk menjalankan seed dan test dari host.
+- Go 1.25 untuk menjalankan test dari host (opsional).
 - OpenSSL atau generator random lain untuk membuat secret.
 - Browser modern.
 
@@ -163,34 +163,22 @@ File environment contoh memakai `localhost` untuk URL yang dibuka browser dan
 hostname Docker (`auth-server`, `app-a`, `app-b`) hanya untuk komunikasi internal.
 Tidak perlu mengubah file hosts.
 
-## Untuk step 4-5 ada shortcut `powershell python startup.py --up` (cuman di windows)
-
 ### 4. Start seluruh stack
 
 ```powershell
 docker compose up --build
 ```
 
-### 5. Jalankan seed
-
-Buka terminal lagi .
-
-Karena `go run` tidak membaca file `.env` secara otomatis, jadi harus set environment variable.
-
-Ganti semua placeholder dengan nilai yang sama seperti konfigurasi service:
+Lihat output seed jika diperlukan:
 
 ```powershell
-$env:DATABASE_URL = "postgres://authprovider:authprovider@localhost:5433/authprovider?sslmode=disable"
-$env:SEED_ADMIN_PASSWORD = "<admin-password>"
-$env:SEED_DEMO_PASSWORD = "<demo-password>"
-$env:SEED_APP_A_CLIENT_SECRET = "<app-a-client-secret>"
-$env:SEED_APP_B_CLIENT_SECRET = "<app-b-client-secret>"
-$env:SEED_APP_A_INTERNAL_AUTH_TOKEN = "<app-a-internal-token>"
-$env:SEED_APP_B_INTERNAL_AUTH_TOKEN = "<app-b-internal-token>"
+docker compose logs seed
+```
 
-Push-Location auth-provider/server
-go run ./cmd/seed
-Pop-Location
+Seed idempotent dan aman dijalankan ulang:
+
+```powershell
+docker compose run --rm seed
 ```
 
 Seed feeding data berikut:
@@ -203,7 +191,7 @@ Seed feeding data berikut:
 
 Seed boleh dijalankan ulang tanpa membuat duplicate data.
 
-### 6. Login untuk demo
+### 5. Login untuk demo
 
 1. Buka Control Panel: `http://localhost:5002/login`.
 2. Login sebagai `admin@example.com` untuk mengelola user, group, aplikasi, dan
