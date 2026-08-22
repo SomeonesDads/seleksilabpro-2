@@ -56,6 +56,7 @@ func (a *App) Home(w http.ResponseWriter, r *http.Request) {
 		Profile:         profile,
 		Session:         sess,
 		SessionActive:   active,
+		GlobalLogoutURL: strings.TrimRight(a.Config.AuthProviderPublicURL, "/") + "/logout",
 		ProcessedEvents: events,
 		Activity:        logs,
 		Now:             time.Now().UTC(),

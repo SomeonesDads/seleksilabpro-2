@@ -12,13 +12,14 @@ import (
 )
 
 type dashboardData struct {
-	AppName         string
-	Profile         *store.ProfileCache
-	Session         *store.LocalSession
-	SessionActive   bool
-	ProcessedEvents []store.ProcessedEvent
-	Activity        []store.ActivityLog
-	Now             time.Time
+	AppName          string
+	Profile          *store.ProfileCache
+	Session          *store.LocalSession
+	SessionActive    bool
+	GlobalLogoutURL  string
+	ProcessedEvents  []store.ProcessedEvent
+	Activity         []store.ActivityLog
+	Now              time.Time
 }
 
 func renderLanding(w http.ResponseWriter) {
@@ -62,6 +63,9 @@ func renderDashboard(w http.ResponseWriter, d dashboardData) {
 	}
 	buf.WriteString("</ul>")
 	buf.WriteString(`<form method="post" action="/logout"><button type="submit">Local logout</button></form>`)
+	if d.GlobalLogoutURL != "" {
+		buf.WriteString(`<form method="post" action="` + html.EscapeString(d.GlobalLogoutURL) + `"><button type="submit">Logout SSO (Global)</button></form>`)
+	}
 	buf.WriteString("</section>")
 
 	buf.WriteString("<section><h2>Activity Log</h2><table border=\"1\"><tr><th>Time</th><th>Kind</th><th>Message</th></tr>")
